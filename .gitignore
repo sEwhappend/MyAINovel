@@ -1,0 +1,11 @@
+.json/
+data/
+projects/
+backups/
+agent-work/
+.omx/
+test-output/
+__pycache__/
+*.pyc
+*.zip
+.pytest_cache/

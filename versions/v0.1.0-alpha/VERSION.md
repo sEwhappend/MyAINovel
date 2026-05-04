@@ -1,0 +1,42 @@
+# v0.1.0-alpha
+
+## 版本定位
+这是 My AI Novel 的第一个可运行测试版本，用于早期功能验证。
+
+## 目录内容
+- `run.py`
+- `src/`
+- `tests/`
+- `README.md`
+
+## 使用方式
+进入本目录后运行程序或测试。
+
+## 包含能力
+- 本地 tkinter 桌面 UI。
+- OpenAI-compatible LLM 配置、模型扫描、连接测试。
+- 全书故事大纲生成、确认后拆分章节。
+- 章节、小节、资料库、角色卡和版本管理。
+- 正文生成、审稿、改写、定稿和取消定稿。
+- 当前流式生成内容显示。
+- Word 导出已定稿小节。
+
+## 不包含内容
+- 本地 API Key。
+- 用户小说项目。
+- SQLite 运行数据。
+- 备份包和测试输出。
+
+## 运行方式
+在仓库根目录执行：
+
+```powershell
+python run.py
+```
+
+## 测试方式
+在仓库根目录执行：
+
+```powershell
+python -B -m unittest discover -s tests
+```

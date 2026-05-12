@@ -1889,6 +1889,20 @@ class UISmokeTests(unittest.TestCase):
         expected_api_type = str(DEFAULT_LLM_CONFIG.get("api_type", "responses") or "responses")
         self.assertEqual(config["api_type"], expected_api_type)
 
+    def test_build_llm_config_from_vars_accepts_none_like_top_k(self) -> None:
+        config = build_llm_config_from_vars(
+            {
+                "timeout_seconds": FakeVar("30"),
+                "max_tokens": FakeVar("2048"),
+                "temperature": FakeVar("0.8"),
+                "top_p": FakeVar("0.9"),
+                "top_k": FakeVar("None"),
+                "presence_penalty": FakeVar("0.1"),
+                "frequency_penalty": FakeVar("0.2"),
+            }
+        )
+        self.assertIsNone(config["top_k"])
+
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1
         while time.time() < deadline:

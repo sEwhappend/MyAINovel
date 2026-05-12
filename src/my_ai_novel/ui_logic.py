@@ -128,6 +128,11 @@ def normalize_api_type(value: Any) -> str:
     return API_TYPE_LABELS_TO_CONFIG.get(api_type, api_type) or default_api_type()
 
 
+def _is_blank_like(value: Any) -> bool:
+    text = str(value).strip().lower()
+    return text in {"", "none", "null", "nil", "undefined"}
+
+
 def build_llm_config_from_vars(config_vars: dict[str, Any]) -> dict[str, Any]:
     config = dict(DEFAULT_LLM_CONFIG)
     config.setdefault("api_type", default_api_type())
@@ -136,10 +141,17 @@ def build_llm_config_from_vars(config_vars: dict[str, Any]) -> dict[str, Any]:
     config["api_type"] = normalize_api_type(config.get("api_type"))
     config["model_candidates"] = "\n".join(parse_model_candidates(str(config.get("model_candidates", ""))))
     for key in ["timeout_seconds", "max_tokens"]:
-        config[key] = int(config[key] or DEFAULT_LLM_CONFIG[key])
+        raw_value = config.get(key)
+        if _is_blank_like(raw_value):
+            raw_value = DEFAULT_LLM_CONFIG[key]
+        config[key] = int(raw_value)
     for key in ["temperature", "top_p", "presence_penalty", "frequency_penalty"]:
-        config[key] = float(config[key] or DEFAULT_LLM_CONFIG[key])
-    config["top_k"] = int(config["top_k"]) if str(config["top_k"]).strip() else None
+        raw_value = config.get(key)
+        if _is_blank_like(raw_value):
+            raw_value = DEFAULT_LLM_CONFIG[key]
+        config[key] = float(raw_value)
+    top_k_value = config.get("top_k")
+    config["top_k"] = None if _is_blank_like(top_k_value) else int(top_k_value)
     return config
 
 

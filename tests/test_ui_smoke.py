@@ -10,8 +10,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from my_ai_novel.ui import (
-    NovelDesktopUI,
+from my_ai_novel.ui import NovelDesktopUI
+from my_ai_novel.ui_logic import (
     PROJECT_TEXT_FIELDS,
     build_llm_config_from_vars,
     build_world_context_query,
@@ -33,6 +33,26 @@ from my_ai_novel.ui import (
     world_kind_value,
 )
 from my_ai_novel.models import DEFAULT_LLM_CONFIG
+from my_ai_novel.ui_theme import (
+    BUTTON_HOVER,
+    BUTTON_PRESSED,
+    PRIMARY,
+    apply_ttk_theme,
+    create_navigation_button,
+    load_customtkinter,
+    set_navigation_button_selected,
+)
+
+
+def destroy_ctk_root(root) -> None:
+    try:
+        for callback_id in root.tk.call("after", "info"):
+            try:
+                root.after_cancel(callback_id)
+            except Exception:
+                pass
+    finally:
+        root.destroy()
 
 
 class FakeVar:
@@ -61,6 +81,49 @@ class FakeText:
             self.value += value
         else:
             self.value = value
+
+
+class UiThemeTests(unittest.TestCase):
+    def test_customtkinter_dependency_message_is_actionable(self) -> None:
+        try:
+            load_customtkinter()
+        except RuntimeError as exc:
+            self.assertIn("python -m pip install -r requirements.txt", str(exc))
+
+    def test_theme_uses_button_like_selected_tabs(self) -> None:
+        try:
+            ctk = load_customtkinter()
+        except RuntimeError:
+            self.skipTest("customtkinter is not installed")
+        root = ctk.CTk()
+        try:
+            apply_ttk_theme(root)
+            from tkinter import ttk
+
+            style = ttk.Style(root)
+            tab_backgrounds = dict(style.map("TNotebook.Tab", query_opt="background"))
+            button_backgrounds = dict(style.map("TButton", query_opt="background"))
+            self.assertEqual(tab_backgrounds.get("selected"), PRIMARY)
+            self.assertEqual(button_backgrounds.get("active"), BUTTON_HOVER)
+            self.assertEqual(button_backgrounds.get("pressed"), BUTTON_PRESSED)
+        finally:
+            destroy_ctk_root(root)
+
+    def test_navigation_button_selected_state_uses_winui_like_highlight(self) -> None:
+        try:
+            ctk = load_customtkinter()
+        except RuntimeError:
+            self.skipTest("customtkinter is not installed")
+        root = ctk.CTk()
+        try:
+            button = create_navigation_button(root, "项目", lambda: None)
+            set_navigation_button_selected(button, True)
+            self.assertEqual(button.cget("fg_color"), PRIMARY)
+            self.assertEqual(button.cget("text_color"), "#ffffff")
+            set_navigation_button_selected(button, False)
+            self.assertEqual(button.cget("fg_color"), "transparent")
+        finally:
+            destroy_ctk_root(root)
 
 
 class FakeRoot:

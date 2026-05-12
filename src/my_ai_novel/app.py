@@ -30,6 +30,17 @@ class NovelApp:
         self.services = services or build_services()
 
     def run(self) -> None:
+        try:
+            from . import pyside_ui as pyside_entry
+        except Exception:
+            pyside_entry = None
+
+        if pyside_entry is not None and getattr(pyside_entry, "PYSIDE6_AVAILABLE", False):
+            print("[startup] Using PySide6 UI")
+            pyside_entry.NovelDesktopUI(self.services, self.title).run()
+            return
+
+        print("[startup] Fallback to legacy tkinter UI")
         from .ui import NovelDesktopUI
 
         NovelDesktopUI(self.services, self.title).run()

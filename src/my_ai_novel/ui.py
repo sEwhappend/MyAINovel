@@ -3,7 +3,6 @@ from __future__ import annotations
 import difflib
 import json
 import os
-import re
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -12,259 +11,46 @@ from typing import Any
 from .app import ApplicationServices
 from .exporter import export_full_book_docx
 from .llm import LLMClient, load_llm_config, save_llm_config
-from .models import DEFAULT_LLM_CONFIG, WORLD_ITEM_KINDS
+from .models import WORLD_ITEM_KINDS
 from .pipeline import NovelPipeline
 from .project_files import ensure_project_structure
 from .retrieval import retrieve_context
-
-
-STATUS_LABELS = {
-    "unplanned": "未规划",
-    "planned": "已规划",
-    "generated": "已生成",
-    "review_pending": "待审",
-    "finalized": "已定稿",
-}
-
-WORLD_KIND_LABELS = {
-    "character": "角色卡",
-    "location": "地点设定",
-    "organization": "组织/势力",
-    "rule": "规则设定",
-    "timeline_event": "时间线",
-    "foreshadowing": "伏笔",
-    "forbidden": "禁止事项",
-}
-WORLD_LABEL_TO_KIND = {label: kind for kind, label in WORLD_KIND_LABELS.items()}
-WORLD_LABEL_TO_KIND["人物设定"] = "character"
-
-LLM_CONFIG_FIELDS = [
-    ("Base URL", "base_url"),
-    ("API 类型", "api_type"),
-    ("API Key", "api_key"),
-    ("代理地址", "proxy_url"),
-    ("正文模型", "chat_model"),
-    ("架构/审稿模型", "review_model"),
-    ("Embedding 模型", "embedding_model"),
-    ("模型候选(每行一个)", "model_candidates"),
-    ("超时秒数", "timeout_seconds"),
-    ("最大 token", "max_tokens"),
-    ("Temperature", "temperature"),
-    ("Top-P", "top_p"),
-    ("Top-K", "top_k"),
-    ("Presence Penalty", "presence_penalty"),
-    ("Frequency Penalty", "frequency_penalty"),
-]
-
-API_TYPE_CHOICES = {
-    "responses": "/responses",
-    "chat_completions": "/chat/completions",
-}
-API_TYPE_VALUES = tuple(API_TYPE_CHOICES.values())
-API_TYPE_LABELS_TO_CONFIG = {label: key for key, label in API_TYPE_CHOICES.items()}
-
-PROJECT_TEXT_FIELDS = [
-    ("总世界书", "world_summary"),
-    ("风格说明", "writing_style_guide"),
-    ("总体概括", "global_concept"),
-]
-
-
-def parse_lines(text: str) -> list[str]:
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-
-def parse_positive_count(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        number = int(value)
-        return number if number > 0 else None
-    text = str(value).strip()
-    if not text:
-        return None
-    text = text.replace(",", "").replace("，", "").replace(" ", "").lower()
-    unit_match = re.search(r"(\d+(?:\.\d+)?)(?:万|w)", text)
-    if unit_match:
-        number = int(float(unit_match.group(1)) * 10000)
-        return number if number > 0 else None
-    number_match = re.search(r"\d+(?:\.\d+)?", text)
-    if not number_match:
-        return None
-    number = int(float(number_match.group(0)))
-    return number if number > 0 else None
-
-
-def calculate_default_section_target_words(length_target: Any, estimated_total_sections: Any) -> str:
-    total_words = parse_positive_count(length_target)
-    section_count = parse_positive_count(estimated_total_sections)
-    if not total_words or not section_count:
-        return ""
-    return str(max(1, round(total_words / section_count)))
-
-
-def world_kind_label(kind: str) -> str:
-    return WORLD_KIND_LABELS.get(kind, kind)
-
-
-def world_kind_value(label_or_kind: str) -> str:
-    return WORLD_LABEL_TO_KIND.get(label_or_kind, label_or_kind)
-
-
-def parse_model_candidates(text: str) -> list[str]:
-    return parse_lines(text)
-
-
-def llm_config_field_keys() -> list[str]:
-    return [key for _label, key in LLM_CONFIG_FIELDS]
-
-
-def config_var_value(var: Any) -> str:
-    try:
-        return var.get("1.0", tk.END).strip()
-    except TypeError:
-        return var.get().strip()
-
-
-def default_api_type() -> str:
-    return str(DEFAULT_LLM_CONFIG.get("api_type", "responses") or "responses")
-
-
-def api_type_display_value(value: Any) -> str:
-    api_type = str(value or default_api_type()).strip()
-    return API_TYPE_CHOICES.get(api_type, api_type)
-
-
-def normalize_api_type(value: Any) -> str:
-    api_type = str(value or default_api_type()).strip()
-    return API_TYPE_LABELS_TO_CONFIG.get(api_type, api_type) or default_api_type()
-
-
-def build_llm_config_from_vars(config_vars: dict[str, Any]) -> dict[str, Any]:
-    config = dict(DEFAULT_LLM_CONFIG)
-    config.setdefault("api_type", default_api_type())
-    for key, var in config_vars.items():
-        config[key] = config_var_value(var)
-    config["api_type"] = normalize_api_type(config.get("api_type"))
-    config["model_candidates"] = "\n".join(parse_model_candidates(str(config.get("model_candidates", ""))))
-    for key in ["timeout_seconds", "max_tokens"]:
-        config[key] = int(config[key] or DEFAULT_LLM_CONFIG[key])
-    for key in ["temperature", "top_p", "presence_penalty", "frequency_penalty"]:
-        config[key] = float(config[key] or DEFAULT_LLM_CONFIG[key])
-    config["top_k"] = int(config["top_k"]) if str(config["top_k"]).strip() else None
-    return config
-
-
-def is_embedding_model(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return "embed" in lowered or "embedding" in lowered
-
-
-def model_scan_autofill(current: dict[str, str], models: list[str]) -> dict[str, str]:
-    updates: dict[str, str] = {}
-    first_chat_model = next((model for model in models if not is_embedding_model(model)), "")
-    first_embedding_model = next((model for model in models if is_embedding_model(model)), "")
-    if not current.get("chat_model", "").strip() and first_chat_model:
-        updates["chat_model"] = first_chat_model
-    if not current.get("review_model", "").strip() and first_chat_model:
-        updates["review_model"] = first_chat_model
-    if not current.get("embedding_model", "").strip() and first_embedding_model:
-        updates["embedding_model"] = first_embedding_model
-    return updates
-
-
-def format_model_discovery_result(result: dict[str, Any]) -> str:
-    models = [str(model) for model in result.get("models", []) if str(model)]
-    source = str(result.get("source", "") or "unknown")
-    warning = str(result.get("warning", "") or "").strip()
-    lines = [f"来源: {source}"]
-    if warning:
-        lines.append(f"警告: {warning}")
-    lines.append("模型列表:")
-    lines.extend(models or ["未发现可用模型"])
-    return "\n".join(lines)
-
-
-def build_world_context_query(values: dict[str, str]) -> str:
-    keys = ["title", "story_time", "location", "characters", "goal", "scene", "conflict", "emotion_shift"]
-    return "\n".join(str(values.get(key, "")).strip() for key in keys if str(values.get(key, "")).strip())
-
-
-def format_world_context_pack(pack: dict[str, Any]) -> str:
-    items = pack.get("long_term", [])
-    forbidden = pack.get("forbidden", [])
-    notes = pack.get("retrieval_notes", [])
-    lines = ["写作参考资料"]
-    if not items:
-        lines.append("未检索到相关资料。")
-    for item in items:
-        label = world_kind_label(str(item.get("kind", "")))
-        name = str(item.get("name", "")).strip() or "未命名"
-        tags = str(item.get("tags", "")).strip()
-        summary = str(item.get("summary", "")).strip()
-        lines.append(f"[{label}] {name}" + (f" | {tags}" if tags else ""))
-        if summary:
-            lines.append(summary)
-    if forbidden:
-        lines.append("")
-        lines.append("禁止事项")
-        for item in forbidden:
-            name = str(item.get("name", "")).strip() or "未命名"
-            summary = str(item.get("summary", "")).strip()
-            lines.append(f"- {name}" + (f"：{summary}" if summary else ""))
-    if notes:
-        lines.append("")
-        lines.append("检索备注")
-        lines.extend(f"- {note}" for note in notes)
-    return "\n".join(lines)
-
-
-def format_character_card_choice(item: dict[str, Any]) -> str:
-    name = str(item.get("name", "")).strip() or "未命名"
-    tags = str(item.get("tags", "")).strip()
-    return f"{name} | {tags}" if tags else name
-
-
-def format_location_choice(item: dict[str, Any]) -> str:
-    name = str(item.get("name", "")).strip() or "未命名"
-    tags = str(item.get("tags", "")).strip()
-    return f"{name} | {tags}" if tags else name
-
-
-def selected_character_card_names(rows: list[dict[str, Any]], indices: list[int] | tuple[int, ...]) -> list[str]:
-    names = []
-    for index in indices:
-        if 0 <= index < len(rows):
-            name = str(rows[index].get("name", "")).strip()
-            if name:
-                names.append(name)
-    return names
-
-
-def selected_location_name(rows: list[dict[str, Any]], indices: list[int] | tuple[int, ...]) -> str:
-    for index in indices:
-        if 0 <= index < len(rows):
-            name = str(rows[index].get("name", "")).strip()
-            if name:
-                return name
-    return ""
-
-
-def project_index_by_id(projects: list[dict[str, Any]], project_id: int | None) -> int | None:
-    if project_id is None:
-        return None
-    for index, project in enumerate(projects):
-        if int(project.get("id", 0) or 0) == int(project_id):
-            return index
-    return None
-
-
-def format_export_success_message(path: Any) -> str:
-    return f"全书 Word 已导出：{path}"
-
-
-def latest_outline_index(rows: list[dict[str, Any]]) -> int | None:
-    return 0 if rows else None
+from .ui_logic import (
+    API_TYPE_VALUES,
+    LLM_CONFIG_FIELDS,
+    PROJECT_TEXT_FIELDS,
+    STATUS_LABELS,
+    api_type_display_value,
+    build_llm_config_from_vars,
+    build_world_context_query,
+    calculate_default_section_target_words,
+    config_var_value,
+    format_character_card_choice,
+    format_export_success_message,
+    format_location_choice,
+    format_model_discovery_result,
+    format_world_context_pack,
+    latest_outline_index,
+    model_scan_autofill,
+    parse_lines,
+    project_index_by_id,
+    selected_character_card_names,
+    selected_location_name,
+    world_kind_label,
+    world_kind_value,
+)
+from .ui_theme import (
+    NAV_WIDTH,
+    PANEL_BG,
+    apply_interaction_cues,
+    apply_ttk_theme,
+    create_navigation_button,
+    create_root,
+    load_customtkinter,
+    set_navigation_button_selected,
+    style_listbox,
+    style_text_widget,
+)
 
 
 class NovelDesktopUI:
@@ -272,9 +58,8 @@ class NovelDesktopUI:
         self.services = services
         self.store = services.store
         self.pipeline = services.pipeline
-        self.root = tk.Tk()
-        self.root.title(title)
-        self.root.geometry("1180x760")
+        self.root = create_root(title)
+        apply_ttk_theme(self.root)
         self.current_project_id: int | None = None
         self.current_chapter_id: int | None = None
         self.current_section_id: int | None = None
@@ -291,8 +76,23 @@ class NovelDesktopUI:
 
     def _build(self) -> None:
         self.status_var = tk.StringVar(value="就绪")
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True)
+        header = ttk.Frame(self.root, padding=(14, 12), style="Header.TFrame")
+        header.pack(fill="x", padx=10, pady=(10, 8))
+        ttk.Label(header, text="My AI Novel", style="Title.TLabel").pack(side="left")
+        ttk.Label(
+            header,
+            text="结构化小说生产流水线",
+            style="Subtitle.TLabel",
+        ).pack(side="left", padx=(12, 0), pady=(4, 0))
+        shell = ttk.Frame(self.root)
+        shell.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.navigation_frame = self._create_navigation_frame(shell)
+        self.navigation_frame.pack(side="left", fill="y", padx=(0, 10))
+        self.notebook = ttk.Notebook(shell, style="Hidden.TNotebook")
+        self.notebook.pack(side="left", fill="both", expand=True)
+        apply_interaction_cues(self.notebook)
+        self.nav_buttons: list[tk.Widget] = []
+        self.nav_pages: list[ttk.Frame] = []
         self._build_project_tab()
         self._build_outline_tab()
         self._build_world_tab()
@@ -300,11 +100,52 @@ class NovelDesktopUI:
         self._build_writing_tab()
         self._build_settings_tab()
         self._build_logs_tab()
-        ttk.Label(self.root, textvariable=self.status_var, anchor="w").pack(fill="x", padx=8, pady=4)
+        self.notebook.bind("<<NotebookTabChanged>>", lambda _event: self._sync_navigation_selection())
+        self._sync_navigation_selection()
+        ttk.Label(self.root, textvariable=self.status_var, anchor="w", style="Status.TLabel").pack(
+            fill="x", padx=10, pady=(0, 10)
+        )
+
+    def _create_navigation_frame(self, parent: tk.Widget) -> tk.Widget:
+        ctk = load_customtkinter()
+        frame = ctk.CTkFrame(parent, width=NAV_WIDTH, corner_radius=16, fg_color=PANEL_BG)
+        frame.pack_propagate(False)
+        ctk.CTkLabel(
+            frame,
+            text="工作台",
+            text_color="#5f6f89",
+            font=("Microsoft YaHei UI", 12, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(16, 8))
+        return frame
+
+    def _add_page(self, frame: ttk.Frame, text: str) -> None:
+        self.notebook.add(frame, text=text)
+        index = len(self.nav_pages)
+        button = create_navigation_button(
+            self.navigation_frame,
+            text,
+            lambda page_index=index: self._select_navigation_page(page_index),
+        )
+        button.pack(fill="x", padx=12, pady=3)
+        self.nav_pages.append(frame)
+        self.nav_buttons.append(button)
+
+    def _select_navigation_page(self, index: int) -> None:
+        if 0 <= index < len(self.nav_pages):
+            self.notebook.select(self.nav_pages[index])
+            self._sync_navigation_selection()
+
+    def _sync_navigation_selection(self) -> None:
+        if not getattr(self, "nav_pages", None):
+            return
+        selected = self.notebook.select()
+        for index, page in enumerate(self.nav_pages):
+            set_navigation_button_selected(self.nav_buttons[index], str(page) == selected)
 
     def _build_project_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="项目")
+        self._add_page(tab, "项目")
         left = ttk.Frame(tab)
         left.pack(side="left", fill="y")
         right_outer = ttk.Frame(tab)
@@ -344,10 +185,11 @@ class NovelDesktopUI:
         ttk.Button(actions, text="打开项目文件夹", command=self.open_project_folder).pack(side="right", padx=(4, 0))
         ttk.Button(actions, text="导出全书 Word", command=self.export_full_book_word).pack(side="right", padx=(4, 0))
         ttk.Button(actions, text="保存项目", command=self.save_project).pack(side="right")
+        self._style_widgets(tab)
 
     def _build_outline_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="总框架")
+        self._add_page(tab, "总框架")
         ttk.Button(tab, text="丰满总体框架", command=self.expand_outline).pack(anchor="w")
         ttk.Button(tab, text="保存当前总框架修改", command=self.save_current_outline).pack(anchor="w", pady=(4, 0))
         ttk.Button(tab, text="确认并拆分章节", command=self.confirm_outline_split).pack(anchor="w", pady=(4, 8))
@@ -365,10 +207,11 @@ class NovelDesktopUI:
         self.outline_split_preview = tk.Text(right, wrap="word")
         self.outline_split_preview.pack(fill="both", expand=True, pady=(8, 0))
         self.outline_versions.bind("<<ListboxSelect>>", lambda _e: self.show_outline_version())
+        self._style_widgets(tab)
 
     def _build_world_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="资料库")
+        self._add_page(tab, "资料库")
         top = ttk.Frame(tab)
         top.pack(fill="x")
         world_kind_values = [world_kind_label(kind) for kind in sorted(WORLD_ITEM_KINDS)]
@@ -392,10 +235,11 @@ class NovelDesktopUI:
         self.world_summary = tk.Text(body, wrap="word")
         body.add(self.world_summary)
         ttk.Button(tab, text="刷新资料库", command=self.refresh_world_items).pack(anchor="e", pady=(8, 0))
+        self._style_widgets(tab)
 
     def _build_structure_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="章节")
+        self._add_page(tab, "章节")
         panes = ttk.PanedWindow(tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
         left = ttk.Frame(panes)
@@ -471,6 +315,7 @@ class NovelDesktopUI:
         ttk.Label(right, text="写作参考资料").pack(anchor="w", pady=(8, 0))
         self.world_context_text = tk.Text(right, height=8, wrap="word")
         self.world_context_text.pack(fill="both", expand=True)
+        self._style_widgets(tab)
 
     def _build_character_card_selector(self, parent: ttk.Frame) -> None:
         row = ttk.Frame(parent)
@@ -495,7 +340,7 @@ class NovelDesktopUI:
     def _build_writing_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
         self.writing_tab = tab
-        self.notebook.add(tab, text="写作")
+        self._add_page(tab, "写作")
         bar = ttk.Frame(tab)
         bar.pack(fill="x")
         for text, command in [
@@ -526,11 +371,12 @@ class NovelDesktopUI:
         ttk.Label(body, text="当前流式生成内容").pack(anchor="w", pady=(8, 0))
         self.current_generation_text = tk.Text(body, wrap="word", height=10)
         self.current_generation_text.pack(fill="both", expand=True, pady=(4, 0))
+        self._style_widgets(tab)
 
     def _scrollable_frame(self, parent: tk.Widget) -> ttk.Frame:
-        canvas = tk.Canvas(parent, highlightthickness=0)
+        canvas = tk.Canvas(parent, highlightthickness=0, background=PANEL_BG)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        content = ttk.Frame(canvas)
+        content = ttk.Frame(canvas, style="Panel.TFrame")
         window_id = canvas.create_window((0, 0), window=content, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -548,7 +394,7 @@ class NovelDesktopUI:
 
     def _build_settings_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="设置")
+        self._add_page(tab, "设置")
         self.config_vars = {}
         config = load_llm_config()
         for label, key in LLM_CONFIG_FIELDS:
@@ -583,13 +429,26 @@ class NovelDesktopUI:
         ttk.Label(tab, text="可用模型").pack(anchor="w", pady=(10, 2))
         self.model_scan_text = tk.Text(tab, height=8, wrap="word")
         self.model_scan_text.pack(fill="both", expand=True)
+        self._style_widgets(tab)
 
     def _build_logs_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)
-        self.notebook.add(tab, text="日志")
+        self._add_page(tab, "日志")
         ttk.Button(tab, text="刷新日志", command=self.refresh_logs).pack(anchor="w")
         self.logs_text = tk.Text(tab, wrap="word")
         self.logs_text.pack(fill="both", expand=True, pady=(8, 0))
+        self._style_widgets(tab)
+
+    def _style_widgets(self, parent: tk.Widget) -> None:
+        for child in parent.winfo_children():
+            if isinstance(child, tk.Text):
+                style_text_widget(child)
+            elif isinstance(child, tk.Listbox):
+                style_listbox(child)
+            elif isinstance(child, tk.Canvas):
+                child.configure(background=PANEL_BG)
+            apply_interaction_cues(child)
+            self._style_widgets(child)
 
     def refresh_projects(self) -> None:
         previous_project_id = getattr(self, "current_project_id", None)

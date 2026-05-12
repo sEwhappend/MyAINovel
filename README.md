@@ -1,10 +1,10 @@
-# My AI Novel
+﻿# My AI Novel
 
 ## 项目简介
 My AI Novel 是一个本地运行的结构化小说生产流水线桌面程序。它通过兼容 OpenAI API 协议的 LLM 服务，辅助用户从世界书、资料库角色卡和总体框架出发，逐步完成大纲丰满、章节拆分、小节规划、正文粗稿、审稿、改写和定稿。
 
 ## 已实现功能
-- 本地 tkinter 桌面 UI。
+- 本地桌面 UI（PySide6 优先，自动回退到 legacy tkinter UI）。
 - 小说项目创建和基础设定管理。
 - 项目“总目标字数/篇幅”用于总体框架拆分后的章节/小节目标字数预算。
 - Scrivener / Obsidian 风格项目文件夹：默认保存在 `projects/`，一个项目一个文件夹。
@@ -41,6 +41,7 @@ My AI Novel 是一个本地运行的结构化小说生产流水线桌面程序�
 ├── run.py
 ├── README.md
 ├── LICENSE
+├── requirements.txt
 ├── docs/
 │   └── releases/
 ├── src/my_ai_novel/
@@ -63,14 +64,21 @@ My AI Novel 是一个本地运行的结构化小说生产流水线桌面程序�
 
 ## 环境要求
 - Python 3.11+
-- 无第三方 Python 依赖
+- PySide6（默认 UI）
+- CustomTkinter（legacy 回退 UI）
 - 一个兼容 OpenAI API 协议的 LLM 服务，提供 `base_url` 和 `api_key`
 
 ## 安装
-无需安装依赖。确认 Python 可用即可：
+确认 Python 可用：
 
 ```bash
 python --version
+```
+
+安装依赖：
+
+```bash
+python -m pip install -r requirements.txt
 ```
 
 ## 配置
@@ -167,7 +175,7 @@ python -B -m unittest discover -s tests
 13. 在“项目”页点击“导出全书 Word”，导出的 `.docx` 保存在当前项目 `exports/` 目录，未定稿小节会被跳过。
 
 ## 主要设计决策
-- 第一版使用 Python 标准库，降低安装和部署成本。
+- 第一版核心逻辑使用 Python 标准库，桌面 UI 使用 CustomTkinter 改善观感。
 - 项目文件夹作为可读数据副本，SQLite 保留为索引和旧数据迁移来源。
 - Word 导出用标准库生成基础 `.docx`，不引入 `python-docx` 依赖。
 - API key 不进入 SQLite，只保存在当前目录 `.json/`。

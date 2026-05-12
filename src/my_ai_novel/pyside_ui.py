@@ -66,6 +66,50 @@ def _install_message() -> str:
     return "未安装 PySide6。请运行：python -m pip install -r requirements.txt"
 
 
+def build_pyside_stylesheet() -> str:
+    return """
+    QMainWindow, QWidget { background: #f3f6fb; color: #1f2937; font-family: "Microsoft YaHei UI"; }
+    QLabel#Header { font-size: 18px; font-weight: 700; padding: 12px; background: #ffffff; border-radius: 12px; }
+    QLabel#Status { padding: 8px 10px; background: #ffffff; border-radius: 10px; color: #526070; }
+    QListWidget, QTextEdit, QLineEdit, QComboBox {
+        background: #ffffff; border: 1px solid #d8e0ea; border-radius: 8px; padding: 6px;
+    }
+    QListWidget { outline: 0; }
+    QListWidget::item {
+        padding: 8px 10px;
+        margin: 2px 2px;
+        border-radius: 6px;
+        border: 1px solid transparent;
+    }
+    QListWidget::item:hover {
+        background: #eef4ff;
+        border-color: #c7d7ff;
+    }
+    QListWidget::item:pressed {
+        background: #d7e3ff;
+        border-color: #8fb3ff;
+    }
+    QListWidget::item:selected {
+        background: #dbeafe;
+        border-color: transparent;
+        color: #1e3a8a;
+    }
+    QListWidget::item:selected:hover {
+        background: #cfe0ff;
+    }
+    QListWidget::item:focus {
+        outline: none;
+        border: 1px solid transparent;
+    }
+    QPushButton {
+        background: #ffffff; border: 1px solid #c9d4e2; border-radius: 8px; padding: 7px 10px;
+    }
+    QPushButton:hover { background: #eaf1ff; border-color: #8fb3ff; }
+    QPushButton:pressed { background: #2563eb; color: white; }
+    QFrame { border: 0; }
+    """
+
+
 class _ValueAdapter:
     def __init__(self, value: str) -> None:
         self.value = value
@@ -421,24 +465,7 @@ if PYSIDE6_AVAILABLE:
             layout.addWidget(self.logs_text, 1)
 
         def _apply_theme(self) -> None:
-            self.window.setStyleSheet(
-                """
-                QMainWindow, QWidget { background: #f3f6fb; color: #1f2937; font-family: "Microsoft YaHei UI"; }
-                QLabel#Header { font-size: 18px; font-weight: 700; padding: 12px; background: #ffffff; border-radius: 12px; }
-                QLabel#Status { padding: 8px 10px; background: #ffffff; border-radius: 10px; color: #526070; }
-                QListWidget, QTextEdit, QLineEdit, QComboBox {
-                    background: #ffffff; border: 1px solid #d8e0ea; border-radius: 8px; padding: 6px;
-                }
-                QListWidget::item { padding: 8px; border-radius: 6px; }
-                QListWidget::item:selected { background: #2563eb; color: white; }
-                QPushButton {
-                    background: #ffffff; border: 1px solid #c9d4e2; border-radius: 8px; padding: 7px 10px;
-                }
-                QPushButton:hover { background: #eaf1ff; border-color: #8fb3ff; }
-                QPushButton:pressed { background: #2563eb; color: white; }
-                QFrame { border: 0; }
-                """
-            )
+            self.window.setStyleSheet(build_pyside_stylesheet())
 
         def _text(self, widget: Any) -> str:
             if isinstance(widget, QTextEdit):

@@ -33,6 +33,7 @@ from my_ai_novel.ui_logic import (
     world_kind_value,
 )
 from my_ai_novel.models import DEFAULT_LLM_CONFIG
+from my_ai_novel.pyside_ui import build_pyside_stylesheet
 from my_ai_novel.ui_theme import (
     BUTTON_HOVER,
     BUTTON_PRESSED,
@@ -1902,6 +1903,12 @@ class UISmokeTests(unittest.TestCase):
             }
         )
         self.assertIsNone(config["top_k"])
+
+    def test_pyside_stylesheet_contains_hover_and_pressed_feedback(self) -> None:
+        stylesheet = build_pyside_stylesheet()
+        self.assertIn("QListWidget::item:hover", stylesheet)
+        self.assertIn("QListWidget::item:pressed", stylesheet)
+        self.assertIn("QPushButton:pressed", stylesheet)
 
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1

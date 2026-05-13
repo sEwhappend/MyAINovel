@@ -13,6 +13,12 @@ from .models import WORLD_ITEM_KINDS
 from .pipeline import NovelPipeline
 from .project_files import ensure_project_structure
 from .retrieval import retrieve_context
+from .style_tags import (
+    DIALOGUE_QUOTE_STYLES,
+    FIELD_TO_CATEGORY,
+    list_style_tag_catalog,
+    normalize_tag_ids,
+)
 from .ui_logic import (
     API_TYPE_VALUES,
     LLM_CONFIG_FIELDS,
@@ -32,6 +38,11 @@ from .ui_logic import (
     world_kind_label,
     world_kind_value,
 )
+from .world_modules import (
+    character_basic_fields_from_details,
+    dump_details,
+    update_character_basic_fields,
+)
 
 try:
     from PySide6.QtCore import QRect, QObject, QSize, Qt, Signal
@@ -40,6 +51,8 @@ try:
         QApplication,
         QCheckBox,
         QComboBox,
+        QDialog,
+        QDialogButtonBox,
         QFormLayout,
         QFrame,
         QHBoxLayout,
@@ -50,6 +63,7 @@ try:
         QMainWindow,
         QMessageBox,
         QPushButton,
+        QSizePolicy,
         QSplitter,
         QStackedWidget,
         QStyle,
@@ -477,6 +491,8 @@ if PYSIDE6_AVAILABLE:
             self.current_world_item_id: int | None = None
             self.current_world_details_json = ""
             self.current_version_ids: list[int] = []
+            self.project_tag_selection: dict[str, list[str]] = {}
+            self.dialogue_quote_style_value = "cn_quotes"
             self.projects: list[dict[str, Any]] = []
             self.outline_version_rows: list[dict[str, Any]] = []
             self.world_rows: list[dict[str, Any]] = []
@@ -547,8 +563,14 @@ if PYSIDE6_AVAILABLE:
             button.clicked.connect(callback)
             return button
 
+        def _resize_dialog_to_window(self, dialog: QDialog) -> None:
+            size = self.window.size()
+            if size.isValid():
+                dialog.resize(size)
+
         def _build_project_page(self) -> None:
             page = self._add_page("项目")
+            self.project_page = page
             layout = QHBoxLayout(page)
             left_frame = QFrame()
             left_frame.setObjectName("ProjectShelfPane")
@@ -607,6 +629,7 @@ if PYSIDE6_AVAILABLE:
                 text.setMinimumHeight(80)
                 self.project_texts[key] = text
                 right.addWidget(text)
+            self._build_project_tag_controls(right)
             actions = QHBoxLayout()
             for text, callback in [
                 ("保存项目", self.save_project),
@@ -617,8 +640,14 @@ if PYSIDE6_AVAILABLE:
             right.addLayout(actions)
             layout.addWidget(right_frame, 1)
 
+        def _build_project_tag_controls(self, parent: QVBoxLayout) -> None:
+            self.project_tag_summary = QLabel("未选择标签；对白引号：中文弯引号")
+            parent.addWidget(self.project_tag_summary)
+            parent.addWidget(self._button("选择标签与引号", self.edit_project_tags_dialog))
+
         def _build_outline_page(self) -> None:
             page = self._add_page("总框架")
+            self.outline_page = page
             layout = QHBoxLayout(page)
             left = QVBoxLayout()
             for text, callback in [
@@ -644,8 +673,12 @@ if PYSIDE6_AVAILABLE:
 
         def _build_world_page(self) -> None:
             page = self._add_page("资料库")
+            self.world_page = page
             layout = QHBoxLayout(page)
-            left = QVBoxLayout()
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            layout.addWidget(splitter)
+            left_panel = QWidget()
+            left = QVBoxLayout(left_panel)
             self.world_kind = QComboBox()
             self.world_kind.addItems([world_kind_label(kind) for kind in sorted(WORLD_ITEM_KINDS)])
             self.world_kind.setCurrentText(world_kind_label("character"))
@@ -655,16 +688,27 @@ if PYSIDE6_AVAILABLE:
             self.world_list.setObjectName("WorldList")
             self.world_list.currentRowChanged.connect(lambda _row: self.select_world_item())
             left.addWidget(self.world_list, 1)
+            left.addWidget(self._button("AI 自动创建资料", self.create_world_item_with_ai))
+            left.addWidget(self._button("手动创建资料", self.new_world_item))
             left.addWidget(self._button("刷新资料库", self.refresh_world_items))
-            layout.addLayout(left, 1)
+            splitter.addWidget(left_panel)
 
-            right = QVBoxLayout()
+            right_panel = QWidget()
+            right = QVBoxLayout(right_panel)
             self.world_name = QLineEdit()
             self.world_tags = QLineEdit()
             right.addWidget(QLabel("名称"))
             right.addWidget(self.world_name)
             right.addWidget(QLabel("标签"))
             right.addWidget(self.world_tags)
+            self.character_basic_frame = QFrame()
+            character_basic = QVBoxLayout(self.character_basic_frame)
+            self.character_basic_summary = QLabel("角色卡基础信息未设置")
+            self.character_basic_summary.setWordWrap(True)
+            self.character_basic_summary.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            character_basic.addWidget(self.character_basic_summary)
+            character_basic.addWidget(self._button("编辑角色卡基础信息", self.edit_character_basic_dialog))
+            right.addWidget(self.character_basic_frame)
             right.addWidget(QLabel("摘要"))
             self.world_summary = QTextEdit()
             right.addWidget(self.world_summary, 1)
@@ -672,11 +716,16 @@ if PYSIDE6_AVAILABLE:
             for text, callback in [
                 ("保存资料", self.save_world_item),
                 ("删除资料", self.delete_world_item),
+                ("查看/编辑完整 JSON", self.edit_world_details_json),
                 ("AI 自动补充设定", self.enrich_selected_world_item),
             ]:
                 actions.addWidget(self._button(text, callback))
             right.addLayout(actions)
-            layout.addLayout(right, 2)
+            splitter.addWidget(right_panel)
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 2)
+            splitter.setSizes([320, 680])
+            self._sync_world_character_form_visibility()
 
         def _build_structure_page(self) -> None:
             page = self._add_page("章节")
@@ -869,6 +918,97 @@ if PYSIDE6_AVAILABLE:
             else:
                 widget.setText(text)
 
+        def _project_tag_data(self) -> dict[str, str]:
+            data: dict[str, str] = {}
+            for field in FIELD_TO_CATEGORY:
+                data[field] = json.dumps(
+                    list(getattr(self, "project_tag_selection", {}).get(field, [])),
+                    ensure_ascii=False,
+                )
+            data["dialogue_quote_style"] = getattr(self, "dialogue_quote_style_value", "cn_quotes")
+            return data
+
+        def _set_project_tag_data(self, project: dict[str, Any]) -> None:
+            self.project_tag_selection = {
+                field: normalize_tag_ids(project.get(field))
+                for field in FIELD_TO_CATEGORY
+            }
+            self.dialogue_quote_style_value = str(project.get("dialogue_quote_style") or "cn_quotes")
+            self._update_project_tag_summary()
+
+        def _clear_project_tag_data(self) -> None:
+            self._set_project_tag_data({})
+
+        def _update_project_tag_summary(self) -> None:
+            if not hasattr(self, "project_tag_summary"):
+                return
+            catalog = list_style_tag_catalog()
+            label_by_id = {
+                str(tag.get("id", "")): str(tag.get("label", tag.get("id", "")))
+                for tags in catalog.values()
+                for tag in tags
+            }
+            selected_labels = [
+                label_by_id.get(tag_id, tag_id)
+                for values in getattr(self, "project_tag_selection", {}).values()
+                for tag_id in values
+            ]
+            quote = DIALOGUE_QUOTE_STYLES.get(
+                getattr(self, "dialogue_quote_style_value", "cn_quotes"),
+                DIALOGUE_QUOTE_STYLES["cn_quotes"],
+            )
+            tags_text = "、".join(selected_labels) if selected_labels else "未选择标签"
+            self.project_tag_summary.setText(f"{tags_text}；对白引号：{quote['label']}")
+
+        def edit_project_tags_dialog(self) -> None:
+            dialog = QDialog(self.window)
+            dialog.setWindowTitle("选择标签与引号")
+            layout = QVBoxLayout(dialog)
+            catalog = list_style_tag_catalog()
+            labels = {
+                "selected_genre_tags": "题材标签",
+                "selected_setting_tags": "设定标签",
+                "selected_structure_tags": "结构标签",
+                "selected_style_tags": "风格标签",
+            }
+            checks: dict[str, dict[str, QCheckBox]] = {}
+            current_selection = getattr(self, "project_tag_selection", {})
+            for field, category in FIELD_TO_CATEGORY.items():
+                layout.addWidget(QLabel(labels.get(field, field)))
+                row = QHBoxLayout()
+                checks[field] = {}
+                selected = set(current_selection.get(field, []))
+                for tag in catalog.get(category, []):
+                    tag_id = str(tag.get("id", ""))
+                    checkbox = QCheckBox(str(tag.get("label", tag_id)))
+                    checkbox.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
+                    checkbox.setChecked(tag_id in selected)
+                    checks[field][tag_id] = checkbox
+                    row.addWidget(checkbox)
+                row.addStretch(1)
+                layout.addLayout(row)
+            layout.addWidget(QLabel("对白引号"))
+            quote_combo = QComboBox()
+            for quote_id, item in DIALOGUE_QUOTE_STYLES.items():
+                quote_combo.addItem(str(item["label"]), quote_id)
+            quote_index = quote_combo.findData(getattr(self, "dialogue_quote_style_value", "cn_quotes"))
+            quote_combo.setCurrentIndex(quote_index if quote_index >= 0 else 0)
+            layout.addWidget(quote_combo)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.project_tag_selection = {
+                field: [tag_id for tag_id, checkbox in field_checks.items() if checkbox.isChecked()]
+                for field, field_checks in checks.items()
+            }
+            self.dialogue_quote_style_value = str(quote_combo.currentData() or "cn_quotes")
+            self._update_project_tag_summary()
+
         def _selected_row(self, list_widget: QListWidget, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             row = list_widget.currentRow()
             if row < 0 or row >= len(rows):
@@ -891,14 +1031,18 @@ if PYSIDE6_AVAILABLE:
                 rebuild_cache()
             previous_project_id = self.current_project_id
             self.projects = self.store.list_projects()
-            self.project_list.clear()
-            for project in self.projects:
-                item = QListWidgetItem(self._project_shelf_label(project))
-                item.setSizeHint(QSize(176, 252))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                item.setToolTip(f"{project['id']} | {project['title']}")
-                item.setData(Qt.ItemDataRole.UserRole, int(project["id"]))
-                self.project_list.addItem(item)
+            self.project_list.blockSignals(True)
+            try:
+                self.project_list.clear()
+                for project in self.projects:
+                    item = QListWidgetItem(self._project_shelf_label(project))
+                    item.setSizeHint(QSize(176, 252))
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                    item.setToolTip(f"{project['id']} | {project['title']}")
+                    item.setData(Qt.ItemDataRole.UserRole, int(project["id"]))
+                    self.project_list.addItem(item)
+            finally:
+                self.project_list.blockSignals(False)
             if previous_project_id and project_index_by_id(self.projects, previous_project_id) is None:
                 self.start_new_project()
                 self._ok("当前项目文件夹已不存在，已从列表移除")
@@ -923,6 +1067,7 @@ if PYSIDE6_AVAILABLE:
                 self._set_text(widget, project.get(key, ""))
             for key, widget in self.project_texts.items():
                 self._set_text(widget, project.get(key, ""))
+            self._set_project_tag_data(project)
             self._clear_project_views()
             self.refresh_all_project_views()
 
@@ -936,6 +1081,7 @@ if PYSIDE6_AVAILABLE:
                 self._set_text(widget, "")
             for widget in self.project_texts.values():
                 self._set_text(widget, "")
+            self._clear_project_tag_data()
             self.project_list.clearSelection()
             self._clear_project_views()
             self._ok("已切换到新建项目")
@@ -980,10 +1126,117 @@ if PYSIDE6_AVAILABLE:
             self.world_name.clear()
             self.world_tags.clear()
             self.world_summary.clear()
+            self._clear_character_basic_form()
+            self._sync_world_character_form_visibility()
+
+        def _clear_character_basic_form(self) -> None:
+            if hasattr(self, "character_basic_summary"):
+                self.character_basic_summary.setText("角色卡基础信息未设置")
+
+        def _sync_world_character_form_visibility(self) -> None:
+            if hasattr(self, "character_basic_frame"):
+                self.character_basic_frame.setVisible(world_kind_value(self.world_kind.currentText()) == "character")
+
+        def _fill_character_basic_form(self, details_json: Any) -> None:
+            fields = character_basic_fields_from_details(details_json)
+            parts = [
+                str(fields.get("identity", "") or "").strip(),
+                str(fields.get("personality", "") or "").strip(),
+                str(fields.get("motivation", "") or "").strip(),
+                str(fields.get("speech_style", "") or "").strip(),
+                self._character_role_label(fields.get("role_flags", {})),
+            ]
+            text = " / ".join(part for part in parts if part)
+            if hasattr(self, "character_basic_summary"):
+                self.character_basic_summary.setText(text or "角色卡基础信息未设置")
+
+        def _world_details_from_form(self) -> str:
+            return self.current_world_details_json
+
+        def _character_role_options(self) -> list[tuple[str, str]]:
+            return [
+                ("", "未指定"),
+                ("protagonist", "主角"),
+                ("pov", "POV"),
+                ("ensemble_main", "群像主要角色"),
+                ("supporting", "重要配角"),
+            ]
+
+        def _character_role_key(self, role_flags: Any) -> str:
+            if not isinstance(role_flags, dict):
+                return ""
+            for key, _label in self._character_role_options():
+                if key and role_flags.get(key):
+                    return key
+            return ""
+
+        def _character_role_label(self, role_flags: Any) -> str:
+            selected = self._character_role_key(role_flags)
+            for key, label in self._character_role_options():
+                if key == selected:
+                    return label if key else ""
+            return ""
+
+        def _single_character_role_flags(self, selected_key: str) -> dict[str, bool]:
+            return {
+                key: bool(key and key == selected_key)
+                for key, _label in self._character_role_options()
+                if key
+            }
+
+        def edit_character_basic_dialog(self) -> None:
+            if world_kind_value(self.world_kind.currentText()) != "character":
+                self._error("只有角色卡可以编辑角色卡基础信息")
+                return
+            fields = character_basic_fields_from_details(self.current_world_details_json)
+            dialog = QDialog(self.window)
+            dialog.setWindowTitle("编辑角色卡基础信息")
+            layout = QVBoxLayout(dialog)
+            form = QFormLayout()
+            editors: dict[str, QLineEdit] = {}
+            for label, key in [
+                ("身份", "identity"),
+                ("性格", "personality"),
+                ("动机", "motivation"),
+                ("说话风格", "speech_style"),
+            ]:
+                editor = QLineEdit()
+                editor.setText(str(fields.get(key, "") or ""))
+                editors[key] = editor
+                form.addRow(label, editor)
+            role_combo = QComboBox()
+            selected_role = self._character_role_key(fields.get("role_flags", {}))
+            for key, label in self._character_role_options():
+                role_combo.addItem(label, key)
+            role_index = role_combo.findData(selected_role)
+            role_combo.setCurrentIndex(role_index if role_index >= 0 else 0)
+            form.addRow("角色定位", role_combo)
+            layout.addLayout(form)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            self._resize_dialog_to_window(dialog)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            details = update_character_basic_fields(
+                self.current_world_details_json,
+                identity=editors["identity"].text(),
+                personality=editors["personality"].text(),
+                motivation=editors["motivation"].text(),
+                speech_style=editors["speech_style"].text(),
+                role_flags=self._single_character_role_flags(str(role_combo.currentData() or "")),
+            )
+            self.current_world_details_json = dump_details(details)
+            self._fill_character_basic_form(self.current_world_details_json)
+            self._ok("角色卡基础信息已更新，点击保存资料后落盘")
 
         def save_project(self) -> None:
             data = {key: self._text(widget) for key, widget in self.project_fields.items()}
             data.update({key: self._text(widget) for key, widget in self.project_texts.items()})
+            data.update(self._project_tag_data())
             if not data["title"]:
                 self._error("项目名称不能为空")
                 return
@@ -995,11 +1248,90 @@ if PYSIDE6_AVAILABLE:
                 self._set_text(self.project_fields["default_section_target_words"], data["default_section_target_words"])
             if self.current_project_id:
                 self.store.update_project(self.current_project_id, data)
+                saved_project_id = self.current_project_id
             else:
-                self.current_project_id = self.store.create_project(data)
+                saved_project_id = self.store.create_project(data)
+                self.current_project_id = saved_project_id
             self.refresh_projects()
-            self.select_project_by_id(self.current_project_id)
-            self._ok("项目已保存")
+            self.current_project_id = saved_project_id
+            self.select_project_by_id(saved_project_id)
+            opened_character_setup = self._prompt_main_character_setup_after_save()
+            if opened_character_setup:
+                self._ok("项目已保存，请在资料库创建主要角色卡")
+            else:
+                self._ok("项目已保存")
+
+        def _prompt_main_character_setup_after_save(self) -> bool:
+            project_id = self.current_project_id
+            if not project_id:
+                return False
+            if self.pipeline.main_character_cards(project_id):
+                return False
+            dialog = QMessageBox(self.window)
+            dialog.setWindowTitle("先准备主要角色")
+            dialog.setIcon(QMessageBox.Icon.Information)
+            dialog.setText("当前项目还没有主要角色卡。是否先去资料库创建主要角色，再继续丰满总体框架？")
+            go_button = dialog.addButton("去资料库创建主要角色", QMessageBox.ButtonRole.AcceptRole)
+            dialog.addButton("暂不创建，直接继续", QMessageBox.ButtonRole.RejectRole)
+            dialog.setDefaultButton(go_button)
+            dialog.exec()
+            if dialog.clickedButton() is go_button:
+                self._handle_main_character_setup_choice()
+                return True
+            return False
+
+        def _handle_main_character_setup_choice(self) -> None:
+            self._open_character_card_setup()
+            dialog = QMessageBox(self.window)
+            dialog.setWindowTitle("创建主要角色")
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setText("是否自动调用 API，根据当前项目信息生成一个默认主要角色卡？")
+            auto_button = dialog.addButton("自动生成默认主要角色", QMessageBox.ButtonRole.AcceptRole)
+            dialog.addButton("我自己创建", QMessageBox.ButtonRole.RejectRole)
+            dialog.setDefaultButton(auto_button)
+            dialog.exec()
+            if dialog.clickedButton() is auto_button:
+                project_id = self.current_project_id
+                if not project_id:
+                    return
+                self._run_async(
+                    lambda: self.pipeline.generate_default_main_character(project_id),
+                    "正在生成默认主要角色卡，请稍候...",
+                    "默认主要角色卡已生成",
+                    self._after_generate_default_main_character,
+                )
+
+        def _open_character_card_setup(self) -> None:
+            self.stack.setCurrentWidget(self.world_page)
+            index = self.stack.indexOf(self.world_page)
+            if index >= 0:
+                self.navigation.setCurrentRow(index)
+            self.world_kind.setCurrentText(world_kind_label("character"))
+            self._clear_world_form(reset_kind=False)
+            self._sync_world_character_form_visibility()
+            self.world_name.setFocus()
+
+        def _after_generate_default_main_character(self, result: dict[str, Any]) -> str:
+            item = result.get("world_item", {}) if isinstance(result, dict) else {}
+            if isinstance(item, dict):
+                self._fill_world_item_form(item)
+            self.refresh_world_items()
+            self.refresh_logs()
+            return "默认主要角色卡已生成，可继续编辑后再丰满总体框架"
+
+        def _fill_world_item_form(self, item: dict[str, Any]) -> None:
+            self.current_world_item_id = int(item.get("id", item.get("world_item_id", 0)) or 0) or self.current_world_item_id
+            self.current_world_details_json = item.get("details_json") or json.dumps(
+                item.get("details", {}),
+                ensure_ascii=False,
+                indent=2,
+            )
+            self.world_kind.setCurrentText(world_kind_label(str(item.get("kind", "character"))))
+            self.world_name.setText(str(item.get("name", "")))
+            self.world_tags.setText(str(item.get("tags", "")))
+            self.world_summary.setPlainText(str(item.get("summary", "")))
+            self._fill_character_basic_form(self.current_world_details_json)
+            self._sync_world_character_form_visibility()
 
         def open_project_folder(self) -> None:
             project_id = self._project_required()
@@ -1134,6 +1466,7 @@ if PYSIDE6_AVAILABLE:
             project_id = self._project_required()
             if not project_id:
                 return
+            self.current_world_details_json = self._world_details_from_form()
             self.store.save_world_item(
                 project_id,
                 {
@@ -1147,6 +1480,18 @@ if PYSIDE6_AVAILABLE:
             )
             self.refresh_world_items()
             self._ok("资料已保存")
+
+        def new_world_item(self) -> None:
+            if hasattr(self.world_list, "blockSignals"):
+                previous = self.world_list.blockSignals(True)
+                try:
+                    self.world_list.clearSelection()
+                    self.world_list.setCurrentRow(-1)
+                finally:
+                    self.world_list.blockSignals(previous)
+            self._clear_world_form(reset_kind=False)
+            self.world_name.setFocus()
+            self._ok("已切换到新建资料，填写后点击“保存资料”")
 
         def delete_world_item(self) -> None:
             project_id = self._project_required()
@@ -1162,6 +1507,7 @@ if PYSIDE6_AVAILABLE:
 
         def _on_world_kind_changed(self) -> None:
             self._clear_world_form(reset_kind=False)
+            self._sync_world_character_form_visibility()
             self.refresh_world_items()
 
         def refresh_world_items(self) -> None:
@@ -1186,6 +1532,74 @@ if PYSIDE6_AVAILABLE:
             self.world_name.setText(item.get("name", ""))
             self.world_tags.setText(item.get("tags", ""))
             self.world_summary.setPlainText(item.get("summary", ""))
+            self._fill_character_basic_form(self.current_world_details_json)
+            self._sync_world_character_form_visibility()
+
+        def edit_world_details_json(self) -> None:
+            dialog = QDialog(self.window)
+            dialog.setWindowTitle("查看/编辑完整 JSON")
+            layout = QVBoxLayout(dialog)
+            editor = QTextEdit()
+            editor.setPlainText(self._world_details_from_form() or "{}")
+            layout.addWidget(editor, 1)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            self._resize_dialog_to_window(dialog)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            text = editor.toPlainText().strip()
+            try:
+                json.loads(text or "{}")
+            except json.JSONDecodeError as exc:
+                self._error(f"JSON 格式错误：{exc}")
+                return
+            self.current_world_details_json = text or "{}"
+            self._fill_character_basic_form(self.current_world_details_json)
+            self._ok("完整 JSON 已更新，点击保存资料后落盘")
+
+        def create_world_item_with_ai(self) -> None:
+            project_id = self._project_required()
+            if not project_id:
+                return
+            kind = world_kind_value(self.world_kind.currentText())
+            self._run_async(
+                lambda: self.pipeline.generate_world_item(project_id, kind),
+                f"正在自动创建{world_kind_label(kind)}，请稍候...",
+                "资料已自动创建",
+                self._after_create_world_item_with_ai,
+            )
+
+        def _after_create_world_item_with_ai(self, result: dict[str, Any]) -> str:
+            item = result.get("world_item", {}) if isinstance(result, dict) else {}
+            if isinstance(item, dict):
+                self._fill_world_item_form(item)
+            self.refresh_world_items()
+            self.refresh_logs()
+            return "资料已自动创建，可继续编辑后保存"
+
+        def _ask_world_enrich_direction(self) -> str | None:
+            dialog = QDialog(self.window)
+            dialog.setWindowTitle("AI 修改方向")
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(QLabel("填写本次 AI 自动补充设定的修改方向，可留空。"))
+            editor = QTextEdit()
+            editor.setPlaceholderText("例如：修改名称、强化动机、补充说话风格、补全等级体系限制")
+            editor.setMinimumHeight(120)
+            layout.addWidget(editor)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            self._resize_dialog_to_window(dialog)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return editor.toPlainText().strip()
 
         def enrich_selected_world_item(self) -> None:
             project_id = self._project_required()
@@ -1195,8 +1609,11 @@ if PYSIDE6_AVAILABLE:
                 self._error("请先选择或保存一个资料条目")
                 return
             item_id = int(self.current_world_item_id)
+            direction = self._ask_world_enrich_direction()
+            if direction is None:
+                return
             self._run_async(
-                lambda: self.pipeline.enrich_world_item(project_id, item_id),
+                lambda: self.pipeline.enrich_world_item(project_id, item_id, direction),
                 "正在自动补充资料设定，请稍候...",
                 "资料设定补充完成",
                 self._after_enrich_world_item,
@@ -1205,12 +1622,7 @@ if PYSIDE6_AVAILABLE:
         def _after_enrich_world_item(self, result: dict[str, Any]) -> str:
             item = result.get("world_item", {}) if isinstance(result, dict) else {}
             if isinstance(item, dict):
-                self.current_world_item_id = int(item.get("id", self.current_world_item_id) or 0) or self.current_world_item_id
-                self.current_world_details_json = json.dumps(item.get("details", {}), ensure_ascii=False, indent=2)
-                self.world_kind.setCurrentText(world_kind_label(str(item.get("kind", "character"))))
-                self.world_name.setText(str(item.get("name", "")))
-                self.world_tags.setText(str(item.get("tags", "")))
-                self.world_summary.setPlainText(str(item.get("summary", "")))
+                self._fill_world_item_form(item)
             self.refresh_logs()
             return "资料设定补充完成，请确认后点击“保存资料”"
 

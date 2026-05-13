@@ -18,6 +18,7 @@ from .project_files import (
     sync_project_core,
     sync_versions,
 )
+from .style_tags import PROJECT_STYLE_TAG_FIELDS, dump_tag_ids
 
 
 DEFAULT_DB_PATH = Path(os.environ.get("MY_AI_NOVEL_DB", "data/my_ai_novel.db"))
@@ -176,12 +177,20 @@ class NovelStore:
             "estimated_total_sections": "",
             "default_section_target_words": "",
             "pov": "",
+            "selected_genre_tags": "[]",
+            "selected_setting_tags": "[]",
+            "selected_structure_tags": "[]",
+            "selected_style_tags": "[]",
+            "dialogue_quote_style": "cn_quotes",
             "world_summary": "",
             "character_brief": "",
             "writing_style_guide": "",
             "global_concept": "",
         }
         fields.update({key: value for key, value in data.items() if key in fields})
+        for key in PROJECT_STYLE_TAG_FIELDS:
+            fields[key] = dump_tag_ids(fields.get(key))
+        fields["dialogue_quote_style"] = str(fields.get("dialogue_quote_style") or "cn_quotes")
         _apply_project_word_defaults(fields)
         with self.connection() as conn:
             cur = conn.execute(
@@ -189,9 +198,11 @@ class NovelStore:
                 INSERT INTO projects (
                     title, genre, style, target_readers, length_target,
                     estimated_total_sections, default_section_target_words, pov,
+                    selected_genre_tags, selected_setting_tags,
+                    selected_structure_tags, selected_style_tags, dialogue_quote_style,
                     world_summary, character_brief, writing_style_guide,
                     global_concept, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 """,
                 tuple(fields[name] for name in fields),
             )
@@ -209,6 +220,11 @@ class NovelStore:
             "estimated_total_sections",
             "default_section_target_words",
             "pov",
+            "selected_genre_tags",
+            "selected_setting_tags",
+            "selected_structure_tags",
+            "selected_style_tags",
+            "dialogue_quote_style",
             "world_summary",
             "character_brief",
             "writing_style_guide",
@@ -217,6 +233,11 @@ class NovelStore:
         updates = {key: value for key, value in data.items() if key in allowed}
         if not updates:
             return
+        for key in PROJECT_STYLE_TAG_FIELDS:
+            if key in updates:
+                updates[key] = dump_tag_ids(updates.get(key))
+        if "dialogue_quote_style" in updates:
+            updates["dialogue_quote_style"] = str(updates.get("dialogue_quote_style") or "cn_quotes")
         current = self.get_project(project_id) or {}
         merged = dict(current)
         merged.update(updates)
@@ -843,15 +864,20 @@ class NovelStore:
     def _insert_file_project(self, conn: sqlite3.Connection, bundle: dict[str, Any]) -> None:
         project = dict(bundle["project"])
         _apply_project_word_defaults(project)
+        for key in PROJECT_STYLE_TAG_FIELDS:
+            project[key] = dump_tag_ids(project.get(key))
+        project["dialogue_quote_style"] = str(project.get("dialogue_quote_style") or "cn_quotes")
         project_id = int(project["id"])
         conn.execute(
             """
             INSERT INTO projects (
                 id, title, genre, style, target_readers, length_target,
                 estimated_total_sections, default_section_target_words, pov,
+                selected_genre_tags, selected_setting_tags,
+                selected_structure_tags, selected_style_tags, dialogue_quote_style,
                 world_summary, character_brief, writing_style_guide,
                 global_concept, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -863,6 +889,11 @@ class NovelStore:
                 project.get("estimated_total_sections", ""),
                 project.get("default_section_target_words", ""),
                 project.get("pov", ""),
+                project.get("selected_genre_tags", "[]"),
+                project.get("selected_setting_tags", "[]"),
+                project.get("selected_structure_tags", "[]"),
+                project.get("selected_style_tags", "[]"),
+                project.get("dialogue_quote_style", "cn_quotes"),
                 project.get("world_summary", ""),
                 project.get("character_brief", ""),
                 project.get("writing_style_guide", ""),
@@ -1184,6 +1215,11 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
                 estimated_total_sections TEXT NOT NULL DEFAULT '',
                 default_section_target_words TEXT NOT NULL DEFAULT '',
                 pov TEXT NOT NULL DEFAULT '',
+                selected_genre_tags TEXT NOT NULL DEFAULT '[]',
+                selected_setting_tags TEXT NOT NULL DEFAULT '[]',
+                selected_structure_tags TEXT NOT NULL DEFAULT '[]',
+                selected_style_tags TEXT NOT NULL DEFAULT '[]',
+                dialogue_quote_style TEXT NOT NULL DEFAULT 'cn_quotes',
                 world_summary TEXT NOT NULL DEFAULT '',
                 character_brief TEXT NOT NULL DEFAULT '',
                 writing_style_guide TEXT NOT NULL DEFAULT '',
@@ -1287,6 +1323,11 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             )
             _ensure_column(conn, "projects", "estimated_total_sections", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "projects", "default_section_target_words", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "projects", "selected_genre_tags", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "projects", "selected_setting_tags", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "projects", "selected_structure_tags", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "projects", "selected_style_tags", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "projects", "dialogue_quote_style", "TEXT NOT NULL DEFAULT 'cn_quotes'")
     finally:
         conn.close()
 

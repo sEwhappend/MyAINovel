@@ -73,10 +73,35 @@ class FakeLLM:
             return {"content": "改写正文", "rewrite_notes": "已压缩"}
         if agent_name == "world_item_enricher":
             return {
+                "name": "林砚改名",
                 "summary": "补全后的角色摘要",
                 "details": {"motivation": "寻找真相", "speech_style": "克制"},
                 "tags": "主角,AI补全",
                 "status": "active",
+            }
+        if agent_name == "world_item_creator":
+            return {
+                "kind": "location",
+                "name": "钟楼广场",
+                "summary": "故事开局的重要公共空间。",
+                "details": {"atmosphere": "明亮但暗藏监视"},
+                "tags": "AI创建",
+                "status": "candidate",
+            }
+        if agent_name == "main_character_generator":
+            return {
+                "name": "林砚",
+                "summary": "被旧宅记忆牵引的调查员。",
+                "details": {
+                    "identity": "调查员",
+                    "personality": "克制敏锐",
+                    "motivation": "确认旧宅与父亲失踪的关系",
+                    "speech_style": "短句，回避情绪表达",
+                    "role_flags": {"protagonist": True},
+                    "modules": {"growth": {"start": "不信任他人"}},
+                },
+                "tags": "主角",
+                "status": "candidate",
             }
         if agent_name == "chapter_memory_writer":
             return {
@@ -258,6 +283,63 @@ class PipelineTests(unittest.TestCase):
         version = self.store.get_version(result["version_id"])
         metadata = json.loads(version["metadata_json"])
         self.assertNotIn("chapters", metadata)
+
+    def test_expand_global_concept_includes_database_main_character_cards(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "character",
+                "name": "林砚",
+                "summary": "失忆的调查员",
+                "details": {
+                    "identity": "调查员",
+                    "personality": "克制",
+                    "motivation": "寻找父亲失踪真相",
+                    "speech_style": "短句，少解释",
+                    "role_flags": {"protagonist": True},
+                    "modules": {"level_system": {"level": 3}},
+                },
+                "tags": "主角",
+            },
+        )
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "character",
+                "name": "路人",
+                "summary": "背景人物",
+                "details": {},
+                "tags": "",
+            },
+        )
+
+        pipeline.expand_global_concept(self.project_id)
+
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual([card["name"] for card in payload["main_character_cards"]], ["林砚"])
+        card = payload["main_character_cards"][0]
+        self.assertEqual(card["role"], "主角")
+        self.assertEqual(card["identity"], "调查员")
+        self.assertEqual(card["motivation"], "寻找父亲失踪真相")
+        self.assertEqual(card["modules"]["level_system"]["level"], 3)
+
+    def test_generate_default_main_character_saves_character_card(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+
+        result = pipeline.generate_default_main_character(self.project_id)
+
+        self.assertEqual(result["world_item"]["kind"], "character")
+        self.assertEqual(result["world_item"]["name"], "林砚")
+        self.assertIn("AI生成", result["world_item"]["tags"])
+        details = json.loads(result["world_item"]["details_json"])
+        self.assertEqual(details["identity"], "调查员")
+        self.assertTrue(details["role_flags"]["protagonist"])
+        self.assertEqual(details["modules"]["growth"]["start"], "不信任他人")
+        self.assertEqual(llm.calls[0]["agent_name"], "main_character_generator")
 
     def test_confirm_outline_split_calls_splitter_for_expanded_outline(self) -> None:
         llm = InspectingFakeLLM()
@@ -638,6 +720,7 @@ class PipelineTests(unittest.TestCase):
 
         self.assertEqual(result["world_item_id"], item_id)
         draft = result["world_item"]
+        self.assertEqual(draft["name"], "林砚改名")
         self.assertEqual(draft["summary"], "补全后的角色摘要")
         self.assertEqual(draft["status"], "active")
         self.assertEqual(draft["tags"], "主角,AI补全")
@@ -651,6 +734,50 @@ class PipelineTests(unittest.TestCase):
         details = json.loads(item["details_json"])
         self.assertEqual(details["identity"], "调查者")
         self.assertNotIn("motivation", details)
+
+    def test_enrich_world_item_passes_user_direction(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        item_id = self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "character",
+                "name": "林砚",
+                "summary": "原始摘要",
+                "details": {"identity": "调查者"},
+                "tags": "主角",
+            },
+        )
+
+        pipeline.enrich_world_item(self.project_id, item_id, "强化说话风格")
+
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["enrich_direction"], "强化说话风格")
+
+    def test_generate_world_item_uses_selected_kind_and_latest_outline(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "全书故事大纲",
+                "content": "旧宅故事从雨夜开始。",
+                "metadata": {"expanded_outline": "旧宅故事从雨夜开始。"},
+            }
+        )
+
+        result = pipeline.generate_world_item(self.project_id, "location")
+
+        self.assertEqual(result["world_item"]["kind"], "location")
+        self.assertEqual(result["world_item"]["name"], "钟楼广场")
+        details = json.loads(result["world_item"]["details_json"])
+        self.assertEqual(details["atmosphere"], "明亮但暗藏监视")
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["current_kind"], "location")
+        self.assertEqual(payload["current_outline"]["content"], "旧宅故事从雨夜开始。")
 
     def test_write_chapter_memory_upserts_candidates_from_finalized_sections(self) -> None:
         chapter_id = self.store.save_chapter(self.project_id, {"number": 1, "title": "旧宅入口"})

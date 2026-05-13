@@ -143,6 +143,37 @@ class StorageTests(unittest.TestCase):
         project = self.store.get_project(project_id)
         self.assertEqual(project["default_section_target_words"], "2000")
 
+    def test_project_style_tags_round_trip_to_project_json(self) -> None:
+        project_id = self.store.create_project(
+            {
+                "title": "标签项目",
+                "selected_genre_tags": ["fantasy", "mystery"],
+                "selected_setting_tags": ["level_system"],
+                "selected_structure_tags": ["ensemble"],
+                "selected_style_tags": ["growth"],
+                "dialogue_quote_style": "corner_quotes",
+            }
+        )
+
+        project = self.store.get_project(project_id)
+        self.assertEqual(json.loads(project["selected_genre_tags"]), ["fantasy", "mystery"])
+        self.assertEqual(json.loads(project["selected_setting_tags"]), ["level_system"])
+        self.assertEqual(project["dialogue_quote_style"], "corner_quotes")
+
+        self.store.update_project(
+            project_id,
+            {
+                "selected_setting_tags": "skill_system,ts",
+                "dialogue_quote_style": "cn_quotes",
+            },
+        )
+        project = self.store.get_project(project_id)
+        self.assertEqual(json.loads(project["selected_setting_tags"]), ["skill_system", "ts"])
+        self.assertEqual(project["dialogue_quote_style"], "cn_quotes")
+        project_json = json.loads((self._project_dir(project_id) / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(project_json["selected_setting_tags"]), ["skill_system", "ts"])
+        self.assertEqual(project_json["dialogue_quote_style"], "cn_quotes")
+
     def test_move_section_reorders_and_renumbers_chapter_sections(self) -> None:
         project_id = self.store.create_project({"title": "小节排序"})
         chapter_id = self.store.save_chapter(project_id, {"number": 1, "title": "章节"})

@@ -5,10 +5,12 @@ import re
 from typing import Any
 
 from .llm import LLMClient, parse_json_response
+from .models import validate_world_kind
 from .prompts import SCHEMA_HINTS, build_messages, build_project_writing_constraints
 from .retrieval import retrieve_context
 from .review import build_rewrite_request, validate_review_issues
 from .storage import NovelStore
+from .world_modules import character_basic_fields_from_details, merge_module_patches
 
 
 DEFAULT_SECTION_TARGET_WORDS = 1200
@@ -73,7 +75,7 @@ class NovelPipeline:
         result = self._outline_expansion_result(
             self._call(
                 "global_architect",
-                {"project": project, "project_length_target": project.get("length_target", "")},
+                self._outline_expansion_payload(project_id, project),
             )
         )
         content = result.get("expanded_outline") or json.dumps(result, ensure_ascii=False, indent=2)
@@ -91,7 +93,7 @@ class NovelPipeline:
     def expand_global_concept_streaming(self, project_id: int, on_delta=None) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
         payload = self._with_project_writing_constraints(
-            {"project": project, "project_length_target": project.get("length_target", "")}
+            self._outline_expansion_payload(project_id, project)
         )
         messages = build_messages("global_architect", payload, output_json=False)
         _append_to_first_system_before_user(
@@ -231,20 +233,73 @@ class NovelPipeline:
             world_items += 1
         return {"chapters": created_chapters, "sections": created_sections, "world_items": world_items}
 
-    def enrich_world_item(self, project_id: int, item_id: int) -> dict[str, Any]:
+    def enrich_world_item(self, project_id: int, item_id: int, direction: str = "") -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
         item = self._require(self.store.get_world_item(project_id, item_id), "world_item")
-        result = self._call("world_item_enricher", {"project": project, "world_item": item})
+        payload = {"project": project, "world_item": item}
+        if str(direction or "").strip():
+            payload["enrich_direction"] = str(direction or "").strip()
+        result = self._call("world_item_enricher", payload)
         enriched = {
             "id": item_id,
             "kind": item["kind"],
-            "name": item["name"],
+            "name": str(result.get("name", item.get("name", "")) or "").strip() or item["name"],
             "summary": result.get("summary", item.get("summary", "")),
             "details": self._merged_details(item.get("details_json"), result.get("details")),
             "tags": self._merge_csv(item.get("tags", ""), result.get("tags", "AI补全")),
             "status": result.get("status") or item.get("status") or "active",
         }
         return {"world_item_id": item_id, "world_item": enriched, **result}
+
+    def generate_world_item(self, project_id: int, kind: str) -> dict[str, Any]:
+        project = self._require(self.store.get_project(project_id), "project")
+        kind = validate_world_kind(kind)
+        payload = {"project": project, "current_kind": kind}
+        outline = self._latest_outline_snapshot(project_id)
+        if outline:
+            payload["current_outline"] = outline
+        result = self._call("world_item_creator", payload)
+        created = {
+            "kind": kind,
+            "name": str(result.get("name", "") or "").strip() or f"新{kind}",
+            "summary": str(result.get("summary", "") or "").strip(),
+            "details": result.get("details") if isinstance(result.get("details"), dict) else {},
+            "tags": str(result.get("tags", "") or "").strip(),
+            "status": str(result.get("status", "") or "candidate").strip() or "candidate",
+        }
+        item_id = self.store.save_world_item(project_id, created)
+        saved = self.store.get_world_item(project_id, item_id) or {**created, "id": item_id}
+        return {"world_item_id": item_id, "world_item": saved, **result}
+
+    def generate_default_main_character(self, project_id: int) -> dict[str, Any]:
+        project = self._require(self.store.get_project(project_id), "project")
+        result = self._call("main_character_generator", {"project": project})
+        details = result.get("details") if isinstance(result.get("details"), dict) else {}
+        details = character_basic_fields_from_details(details) | {
+            key: value
+            for key, value in details.items()
+            if key not in {"identity", "personality", "motivation", "speech_style", "role_flags"}
+        }
+        role_flags = details.get("role_flags")
+        if not isinstance(role_flags, dict) or not any(role_flags.values()):
+            details["role_flags"] = {
+                "protagonist": True,
+                "pov": False,
+                "ensemble_main": False,
+                "supporting": False,
+            }
+        details.setdefault("modules", {})
+        item = {
+            "kind": "character",
+            "name": str(result.get("name", "") or "").strip() or "默认主角",
+            "summary": str(result.get("summary", "") or "").strip(),
+            "details": details,
+            "tags": self._merge_csv(result.get("tags", ""), "主角,AI生成"),
+            "status": result.get("status") or "candidate",
+        }
+        item_id = self.store.save_world_item(project_id, item)
+        saved = self.store.get_world_item(project_id, item_id) or {**item, "id": item_id}
+        return {"world_item_id": item_id, "world_item": saved, **result}
 
     def write_chapter_memory(self, project_id: int, chapter_id: int) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
@@ -556,6 +611,55 @@ class NovelPipeline:
         expanded["source"] = expanded.get("source") or "global_expander"
         return expanded
 
+    def main_character_cards(self, project_id: int) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        role_labels = {
+            "protagonist": "主角",
+            "pov": "POV",
+            "ensemble_main": "群像主要角色",
+            "supporting": "重要配角",
+        }
+        for item in self.store.list_world_items(project_id, "character"):
+            details = self._loads(item.get("details_json"))
+            fields = character_basic_fields_from_details(details)
+            role_flags = fields.get("role_flags", {})
+            roles = [
+                label
+                for key, label in role_labels.items()
+                if isinstance(role_flags, dict) and role_flags.get(key)
+            ]
+            tags = str(item.get("tags", "") or "")
+            if not roles:
+                roles = [label for label in role_labels.values() if label in tags]
+            if not roles:
+                continue
+            modules = details.get("modules") if isinstance(details.get("modules"), dict) else {}
+            card = {
+                "name": item.get("name", ""),
+                "role": roles[0],
+                "roles": roles,
+                "summary": item.get("summary", ""),
+                "tags": tags,
+                "identity": fields.get("identity", ""),
+                "personality": fields.get("personality", ""),
+                "motivation": fields.get("motivation", ""),
+                "speech_style": fields.get("speech_style", ""),
+            }
+            if modules:
+                card["modules"] = modules
+            cards.append(card)
+        return cards
+
+    def _outline_expansion_payload(self, project_id: int, project: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "project": project,
+            "project_length_target": project.get("length_target", ""),
+        }
+        main_character_cards = self.main_character_cards(project_id)
+        if main_character_cards:
+            payload["main_character_cards"] = main_character_cards
+        return payload
+
     def _outline_split_metadata(
         self,
         project: dict[str, Any],
@@ -660,6 +764,19 @@ class NovelPipeline:
             deduped.setdefault(key, item)
         return list(deduped.values())
 
+    def _latest_outline_snapshot(self, project_id: int) -> dict[str, Any]:
+        versions = self.store.list_versions(project_id, kind="global_outline")
+        if not versions:
+            return {}
+        latest = versions[0]
+        metadata = self._loads(latest.get("metadata_json")) or {}
+        return {
+            "id": latest.get("id"),
+            "label": latest.get("label", ""),
+            "content": latest.get("content", ""),
+            "metadata": metadata,
+        }
+
     def _explicit_world_item_candidates(self, raw_items: Any, source: str) -> list[dict[str, Any]]:
         if not isinstance(raw_items, list):
             return []
@@ -681,6 +798,8 @@ class NovelPipeline:
             if kind not in valid_kinds or not name:
                 continue
             details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            module_patches = raw.get("module_patches") if isinstance(raw.get("module_patches"), dict) else {}
+            details = merge_module_patches(details, module_patches) if module_patches else details
             items.append(
                 {
                     "kind": kind,

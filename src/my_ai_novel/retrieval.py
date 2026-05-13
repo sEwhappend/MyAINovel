@@ -6,6 +6,8 @@ from typing import Any
 
 from .llm import LLMClient, LLMError
 from .storage import NovelStore
+from .style_tags import selected_tag_definitions
+from .world_modules import extract_required_state_modules
 
 
 WORLD_KIND_PRIORITY = {
@@ -150,8 +152,13 @@ def retrieve_context(
     deduped = rank_world_items(deduped, query)
     forbidden = store.list_world_items(project_id, "forbidden")
     recent_plot = store.list_versions(project_id, chapter_id=chapter_id)[0:5] if chapter_id else []
+    project = store.get_project(project_id) or {}
+    active_tags = selected_tag_definitions(project)
+    state_modules = extract_required_state_modules(deduped + forbidden, active_tags)
     return {
         "long_term": deduped[:limit],
+        "state_modules": state_modules,
+        "active_style_tags": active_tags,
         "recent_plot": recent_plot,
         "current_scene": {"chapter": chapter, "section": section},
         "forbidden": forbidden[:limit],

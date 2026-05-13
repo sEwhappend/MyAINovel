@@ -1948,6 +1948,64 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn('text.setObjectName("ProjectTextInput")', source)
         self.assertIn('text.setPlaceholderText(f"请输入{label}")', source)
 
+    def test_pyside_tag_and_character_details_use_dialog_buttons(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("选择标签与引号", source)
+        self.assertIn("def edit_project_tags_dialog", source)
+        self.assertIn("编辑角色卡基础信息", source)
+        self.assertIn("def edit_character_basic_dialog", source)
+        self.assertIn("role_combo = QComboBox()", source)
+        self.assertIn("_single_character_role_flags", source)
+
+    def test_pyside_save_project_guides_main_character_setup(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _prompt_main_character_setup_after_save", source)
+        self.assertIn("去资料库创建主要角色", source)
+        self.assertIn("暂不创建，直接继续", source)
+        self.assertIn("是否自动调用 API", source)
+        self.assertIn("自动生成默认主要角色", source)
+        self.assertIn("generate_default_main_character", source)
+        self.assertIn("def _after_generate_default_main_character", source)
+        self.assertIn("def _open_character_card_setup", source)
+        self.assertIn("world_kind_label(\"character\")", source)
+
+    def test_pyside_project_refresh_does_not_steal_saved_selection(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("self.project_list.blockSignals(True)", source)
+        self.assertIn("self.project_list.blockSignals(False)", source)
+        self.assertIn("saved_project_id = self.store.create_project(data)", source)
+        self.assertIn("self.current_project_id = saved_project_id", source)
+        self.assertIn("self.select_project_by_id(saved_project_id)", source)
+
+    def test_pyside_character_summary_does_not_expand_world_layout_width(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("self.character_basic_summary.setWordWrap(True)", source)
+        self.assertIn("QSizePolicy.Policy.Ignored", source)
+
+    def test_pyside_world_library_uses_resizable_splitter_and_direction_input(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("splitter = QSplitter(Qt.Orientation.Horizontal)", source)
+        self.assertIn("splitter.setStretchFactor(0, 1)", source)
+        self.assertIn("splitter.setStretchFactor(1, 2)", source)
+        self.assertIn("AI 自动创建资料", source)
+        self.assertIn("手动创建资料", source)
+        self.assertLess(source.index("AI 自动创建资料"), source.index("手动创建资料"))
+        self.assertLess(source.index("手动创建资料"), source.index("刷新资料库"))
+        self.assertIn("def new_world_item", source)
+        self.assertIn("self._clear_world_form(reset_kind=False)", source)
+        self.assertIn("self.world_list.setCurrentRow(-1)", source)
+        self.assertIn("def _ask_world_enrich_direction", source)
+        self.assertIn("AI 修改方向", source)
+        self.assertIn("direction = self._ask_world_enrich_direction()", source)
+        self.assertIn("self.pipeline.enrich_world_item(project_id, item_id, direction)", source)
+        self.assertIn("self.pipeline.generate_world_item(project_id, kind)", source)
+        self.assertNotIn("self.world_ai_direction = QTextEdit()", source)
+
+    def test_pyside_world_edit_dialogs_follow_main_window_size(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _resize_dialog_to_window", source)
+        self.assertGreaterEqual(source.count("self._resize_dialog_to_window(dialog)"), 2)
+
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1
         while time.time() < deadline:

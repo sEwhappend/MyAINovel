@@ -34,8 +34,8 @@ from .ui_logic import (
 )
 
 try:
-    from PySide6.QtCore import QObject, Qt, Signal
-    from PySide6.QtGui import QTextCursor
+    from PySide6.QtCore import QRect, QObject, QSize, Qt, Signal
+    from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -52,6 +52,8 @@ try:
         QPushButton,
         QSplitter,
         QStackedWidget,
+        QStyle,
+        QStyledItemDelegate,
         QTextEdit,
         QVBoxLayout,
         QWidget,
@@ -68,11 +70,55 @@ def _install_message() -> str:
 
 def build_pyside_stylesheet() -> str:
     return """
-    QMainWindow, QWidget { background: #f3f6fb; color: #1f2937; font-family: "Microsoft YaHei UI"; }
-    QLabel#Header { font-size: 18px; font-weight: 700; padding: 12px; background: #ffffff; border-radius: 12px; }
-    QLabel#Status { padding: 8px 10px; background: #ffffff; border-radius: 10px; color: #526070; }
+    QMainWindow, QWidget {
+        background: #f7faff;
+        color: #243042;
+        font-family: "Microsoft YaHei UI";
+        font-size: 13px;
+    }
+    QLabel#Header {
+        font-size: 18px;
+        font-weight: 700;
+        padding: 12px 14px;
+        background: #ffffff;
+        color: #2e5eaa;
+        border: 1px solid #dce6f2;
+        border-left: 6px solid #f6b7c9;
+        border-radius: 10px;
+    }
+    QLabel#Status {
+        padding: 8px 10px;
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-radius: 8px;
+        color: #687589;
+    }
+    QFrame#ProjectShelfPane, QFrame#ProjectDetailPane, QFrame#ChapterOutlinePane, QFrame#ChapterEditorPane {
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-radius: 12px;
+    }
+    QLabel#PanelTitle {
+        color: #2e5eaa;
+        font-weight: 700;
+        padding: 6px 4px;
+    }
+    QFrame#ProjectDetailPane QLabel {
+        background: transparent;
+        border: 0;
+        color: #243042;
+    }
     QListWidget, QTextEdit, QLineEdit, QComboBox {
-        background: #ffffff; border: 1px solid #d8e0ea; border-radius: 8px; padding: 6px;
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-radius: 8px;
+        padding: 6px;
+        selection-background-color: #6fa8ff;
+        selection-color: #ffffff;
+    }
+    QTextEdit:focus, QLineEdit:focus, QComboBox:focus {
+        border: 1px solid #6fa8ff;
+        background: #ffffff;
     }
     QListWidget { outline: 0; }
     QListWidget::item {
@@ -82,30 +128,170 @@ def build_pyside_stylesheet() -> str:
         border: 1px solid transparent;
     }
     QListWidget::item:hover {
-        background: #eef4ff;
-        border-color: #c7d7ff;
+        background: #eaf3ff;
+        border-color: #b8d4ff;
     }
     QListWidget::item:pressed {
-        background: #d7e3ff;
-        border-color: #8fb3ff;
+        background: #dbeaff;
+        border-color: #6fa8ff;
+        padding-top: 9px;
+        padding-bottom: 7px;
     }
     QListWidget::item:selected {
-        background: #dbeafe;
-        border-color: transparent;
-        color: #1e3a8a;
+        background: #6fa8ff;
+        border-color: #2e5eaa;
+        color: #ffffff;
     }
     QListWidget::item:selected:hover {
-        background: #cfe0ff;
+        background: #5b99f2;
     }
     QListWidget::item:focus {
         outline: none;
         border: 1px solid transparent;
     }
-    QPushButton {
-        background: #ffffff; border: 1px solid #c9d4e2; border-radius: 8px; padding: 7px 10px;
+    QListWidget#Navigation {
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-radius: 12px;
+        padding: 8px;
     }
-    QPushButton:hover { background: #eaf1ff; border-color: #8fb3ff; }
-    QPushButton:pressed { background: #2563eb; color: white; }
+    QListWidget#Navigation::item {
+        padding: 10px 12px;
+        margin: 3px 0;
+        border-radius: 8px;
+    }
+    QListWidget#Navigation::item:selected {
+        background: #eaf3ff;
+        color: #2e5eaa;
+        border: 1px solid #b8d4ff;
+        font-weight: 700;
+    }
+    QListWidget#ProjectShelf {
+        background: #fff8fb;
+        border: 1px solid #f5ccd8;
+        padding: 6px;
+    }
+    QListWidget#ProjectShelf::item {
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-left: 8px solid #f6b7c9;
+        border-radius: 8px;
+        margin: 0;
+        padding: 0;
+        min-width: 0;
+        min-height: 0;
+        color: #243042;
+    }
+    QListWidget#ProjectShelf::item:hover {
+        background: #f8fbff;
+        border-color: #b8d4ff;
+        border-left-color: #6fa8ff;
+    }
+    QListWidget#ProjectShelf::item:pressed {
+        background: #eaf3ff;
+        padding-top: 13px;
+        padding-bottom: 11px;
+    }
+    QListWidget#ProjectShelf::item:selected {
+        background: #eaf3ff;
+        color: #1f4f99;
+        border: 1px solid #6fa8ff;
+        border-left: 10px solid #6fa8ff;
+    }
+    QListWidget#ChapterTree::item, QListWidget#SectionList::item {
+        border-left: 4px solid #dce6f2;
+    }
+    QListWidget#ChapterTree::item:selected, QListWidget#SectionList::item:selected {
+        background: #eaf3ff;
+        color: #2e5eaa;
+        border-color: #6fa8ff;
+        border-left-color: #6fa8ff;
+    }
+    QTextEdit#WritingEditor {
+        background: #ffffff;
+        border: 1px solid #ccd9ea;
+        color: #243042;
+        font-size: 14px;
+        line-height: 1.55;
+    }
+    QTextEdit#StreamingOutput {
+        background: #f8fbff;
+        border: 1px solid #b8d4ff;
+        border-left: 5px solid #f6b7c9;
+        color: #243042;
+    }
+    QTextEdit#WorldContext {
+        background: #fbfdff;
+        border-left: 5px solid #6fa8ff;
+    }
+    QTextEdit#ProjectTextInput {
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-radius: 8px;
+        padding: 6px;
+        color: #243042;
+        selection-background-color: #6fa8ff;
+        selection-color: #ffffff;
+    }
+    QTextEdit#ProjectTextInput:focus {
+        border: 1px solid #6fa8ff;
+        background: #ffffff;
+    }
+    QPushButton {
+        background: #ffffff;
+        border: 1px solid #b8d4ff;
+        border-radius: 8px;
+        padding: 7px 11px;
+        color: #2e5eaa;
+        font-weight: 600;
+    }
+    QPushButton:hover {
+        background: #eaf3ff;
+        border-color: #6fa8ff;
+    }
+    QPushButton:pressed {
+        background: #6fa8ff;
+        color: #ffffff;
+        padding-top: 8px;
+        padding-bottom: 6px;
+    }
+    QPushButton[primary="true"] {
+        background: #6fa8ff;
+        color: #ffffff;
+        border-color: #6fa8ff;
+    }
+    QPushButton[primary="true"]:hover {
+        background: #5b99f2;
+        border-color: #2e5eaa;
+    }
+    QPushButton[danger="true"] {
+        color: #e56b73;
+        border-color: #f3b6bc;
+        background: #fff5f6;
+    }
+    QPushButton[danger="true"]:hover {
+        background: #ffe9ec;
+        border-color: #e56b73;
+    }
+    QCheckBox {
+        spacing: 8px;
+        color: #243042;
+    }
+    QCheckBox::indicator {
+        width: 16px;
+        height: 16px;
+        border: 1px solid #b8d4ff;
+        border-radius: 4px;
+        background: #ffffff;
+    }
+    QCheckBox::indicator:checked {
+        background: #6fa8ff;
+        border-color: #2e5eaa;
+    }
+    QComboBox::drop-down {
+        border: 0;
+        width: 24px;
+    }
     QFrame { border: 0; }
     """
 
@@ -124,6 +310,159 @@ if PYSIDE6_AVAILABLE:
         success = Signal(str, object, object)
         error = Signal(str)
         stream = Signal(str, str)
+
+
+    class ProjectShelfListWidget(QListWidget):
+        # 项目书架布局参数：
+        # GRID_WIDTH/GRID_HEIGHT 控制每一本书占用的格子大小。
+        # TWO_COLUMN_MIN_WIDTH 控制书架从单列切换到双列的最小可用宽度。
+        # EDGE_PADDING 和 SCROLLBAR_RESERVE 用来避免内容贴边或被滚动条挤压。
+        GRID_WIDTH = 176
+        GRID_HEIGHT = 300
+        TWO_COLUMN_MIN_WIDTH = 160
+        EDGE_PADDING = 2
+        SCROLLBAR_RESERVE = -130
+
+        def resizeEvent(self, event) -> None:  # type: ignore[override]
+            super().resizeEvent(event)
+            self._fit_book_grid()
+
+        def showEvent(self, event) -> None:  # type: ignore[override]
+            super().showEvent(event)
+            self._fit_book_grid()
+
+        def _fit_book_grid(self) -> None:
+            base_available_width = max(1, self.width() - self.SCROLLBAR_RESERVE - (self.EDGE_PADDING * 2))
+            if base_available_width >= self.TWO_COLUMN_MIN_WIDTH:
+                columns = max(2, base_available_width // self.GRID_WIDTH)
+            else:
+                columns = 1
+            used_width = columns * self.GRID_WIDTH
+            # 固定书本格子宽度，把多余空间分配到左右边距，避免卡片被拉宽。
+            side_padding = self.EDGE_PADDING + max(0, (base_available_width - used_width) // 2)
+            self.setViewportMargins(side_padding, 0, side_padding, 0)
+            self.setGridSize(QSize(self.GRID_WIDTH, self.GRID_HEIGHT))
+
+
+    class ProjectShelfDelegate(QStyledItemDelegate):
+        def sizeHint(self, option, index) -> QSize:  # type: ignore[override]
+            # 实际卡片绘制区域；如果修改这里，通常也要同步调整 GRID_WIDTH/GRID_HEIGHT。
+            return QSize(176, 252)
+
+        def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            selected = bool(option.state & QStyle.StateFlag.State_Selected)
+            hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+            # 限制卡片最大宽度，避免书架格子变宽时卡片也跟着被拉伸。
+            card_width = min(176, max(1, option.rect.width() - 8))
+            card_left = option.rect.left() + max(0, (option.rect.width() - card_width) // 2)
+            cell_rect = QRect(card_left, option.rect.top() + 6, card_width, option.rect.height() - 12)
+            if selected or hovered:
+                painter.setPen(QPen(QColor("#6fa8ff" if selected else "#b8d4ff"), 1))
+                painter.setBrush(QColor("#f8fbff" if hovered else "#eaf3ff"))
+                painter.drawRoundedRect(cell_rect, 14, 14)
+
+            text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+            title, _, meta = text.partition("\n")
+            title = title.strip() or "未命名项目"
+            meta = meta.strip() or "未设置题材"
+            palette_index = sum(ord(char) for char in title) % 4
+            palettes = [
+                ("#8ea6d9", "#f6b7c9", "#ffffff"),
+                ("#f06a68", "#f6b7c9", "#ffffff"),
+                ("#f9fbf8", "#57a7c9", "#f2c75c"),
+                ("#dfe9ff", "#6fa8ff", "#fff0f5"),
+            ]
+            cover_top, cover_mid, cover_accent = palettes[palette_index]
+
+            cover_width = 132
+            cover_height = 213
+            cover_left = cell_rect.left() + (cell_rect.width() - cover_width) // 2
+            cover_top_y = cell_rect.top() + 12
+            cover_rect = QRect(cover_left, cover_top_y, cover_width, cover_height)
+            shadow_rect = cover_rect.adjusted(5, 6, 8, 10)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(36, 48, 66, 34))
+            painter.drawRoundedRect(shadow_rect, 12, 12)
+
+            gradient = QLinearGradient(cover_rect.topLeft(), cover_rect.bottomRight())
+            gradient.setColorAt(0, QColor(cover_top))
+            gradient.setColorAt(0.58, QColor(cover_mid))
+            gradient.setColorAt(1, QColor(cover_accent))
+            painter.setBrush(gradient)
+            painter.setPen(QPen(QColor("#dce6f2"), 1))
+            painter.drawRoundedRect(cover_rect, 12, 12)
+
+            spine_rect = QRect(cover_rect.left(), cover_rect.top(), 16, cover_rect.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 46))
+            painter.drawRoundedRect(spine_rect, 9, 9)
+            painter.setBrush(QColor(36, 48, 66, 30))
+            painter.drawRect(spine_rect.adjusted(11, 0, 12, 0))
+
+            if palette_index in (0, 3):
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(255, 255, 255, 120))
+                painter.drawEllipse(cover_rect.center().x() - 34, cover_rect.center().y() - 18, 68, 52)
+                painter.setBrush(QColor(246, 183, 201, 112))
+                painter.drawEllipse(cover_rect.center().x() - 18, cover_rect.center().y() + 20, 36, 26)
+            elif palette_index == 1:
+                painter.setPen(QPen(QColor(255, 255, 255, 190), 6))
+                painter.drawLine(cover_rect.left() + 30, cover_rect.top() + 56, cover_rect.left() + 66, cover_rect.top() + 96)
+                painter.drawLine(cover_rect.left() + 66, cover_rect.top() + 56, cover_rect.left() + 30, cover_rect.top() + 96)
+                painter.setPen(QPen(QColor(255, 255, 255, 70), 8))
+                painter.drawLine(cover_rect.left() + 26, cover_rect.bottom() - 48, cover_rect.right() - 18, cover_rect.bottom() - 48)
+                painter.drawLine(cover_rect.left() + 26, cover_rect.bottom() - 28, cover_rect.left() + 66, cover_rect.bottom() - 28)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#57a7c9"))
+                painter.drawEllipse(cover_rect.left() + 18, cover_rect.top() + 60, 62, 62)
+                painter.setBrush(QColor("#f2c75c"))
+                painter.drawEllipse(cover_rect.left() + 30, cover_rect.top() + 74, 34, 34)
+
+            shelf_rect = QRect(cell_rect.left() + 6, cover_rect.bottom() + 8, cell_rect.width() - 12, 8)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#eef2f7"))
+            painter.drawRoundedRect(shelf_rect, 4, 4)
+            painter.setBrush(QColor(36, 48, 66, 22))
+            painter.drawRoundedRect(shelf_rect.adjusted(4, 6, -4, 8), 6, 6)
+
+            text_rect = QRect(cell_rect.left() + 18, shelf_rect.bottom() + 10, cell_rect.width() - 36, 42)
+            title_font = QFont(option.font)
+            title_font.setBold(True)
+            title_font.setPointSize(max(title_font.pointSize() + 1, 10))
+            painter.setFont(title_font)
+            painter.setPen(QColor("#1f4f99" if selected else "#243042"))
+            title_text = painter.fontMetrics().elidedText(title, Qt.TextElideMode.ElideRight, text_rect.width())
+            painter.drawText(
+                text_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                title_text,
+            )
+
+            meta_font = QFont(option.font)
+            meta_font.setPointSize(max(meta_font.pointSize(), 9))
+            painter.setFont(meta_font)
+            painter.setPen(QColor("#687589"))
+            meta_rect = QRect(text_rect.left(), text_rect.top() + 26, text_rect.width(), 20)
+            meta_text = painter.fontMetrics().elidedText(meta, Qt.TextElideMode.ElideRight, meta_rect.width())
+            painter.drawText(meta_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, meta_text)
+
+            if selected:
+                chip_rect = QRect(cover_rect.right() - 44, cover_rect.top() + 10, 34, 18)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#fff0f5"))
+                painter.drawRoundedRect(chip_rect, 8, 8)
+                chip_font = QFont(option.font)
+                chip_font.setPointSize(8)
+                painter.setFont(chip_font)
+                painter.setPen(QColor("#2e5eaa"))
+                painter.drawText(chip_rect, Qt.AlignmentFlag.AlignCenter, "当前")
+
+            painter.restore()
 
 
     class NovelDesktopUI:
@@ -149,13 +488,14 @@ if PYSIDE6_AVAILABLE:
             self._async_busy = False
             self.automation_cancel_event: threading.Event | None = None
             self.app = QApplication.instance() or QApplication([])
+            self.app.setStyle("Fusion")
             self.bridge = _AsyncBridge()
             self.bridge.success.connect(self._complete_async_success)
             self.bridge.error.connect(self._complete_async_error)
             self.bridge.stream.connect(self._append_streaming_target)
             self.window = QMainWindow()
             self.window.setWindowTitle(title)
-            self.window.resize(1220, 780)
+            self.window.resize(1187, 667)
             self._build()
             self.refresh_projects()
 
@@ -173,6 +513,7 @@ if PYSIDE6_AVAILABLE:
 
             shell = QHBoxLayout()
             self.navigation = QListWidget()
+            self.navigation.setObjectName("Navigation")
             self.navigation.setFixedWidth(170)
             self.stack = QStackedWidget()
             shell.addWidget(self.navigation)
@@ -209,16 +550,38 @@ if PYSIDE6_AVAILABLE:
         def _build_project_page(self) -> None:
             page = self._add_page("项目")
             layout = QHBoxLayout(page)
-            left = QVBoxLayout()
-            left.addWidget(QLabel("项目列表"))
-            self.project_list = QListWidget()
+            left_frame = QFrame()
+            left_frame.setObjectName("ProjectShelfPane")
+            # 保证启动时项目书架左栏足够放下两张正常尺寸的书本卡片。
+            #left_frame.setMinimumWidth(450)
+            left = QVBoxLayout(left_frame)
+            shelf_title = QLabel("项目列表")
+            shelf_title.setObjectName("PanelTitle")
+            left.addWidget(shelf_title)
+            self.project_list = ProjectShelfListWidget()
+            self.project_list.setObjectName("ProjectShelf")
+            self.project_list.setViewMode(QListWidget.ViewMode.IconMode)
+            self.project_list.setFlow(QListWidget.Flow.LeftToRight)
+            self.project_list.setWrapping(True)
+            self.project_list.setMovement(QListWidget.Movement.Static)
+            self.project_list.setResizeMode(QListWidget.ResizeMode.Adjust)
+            self.project_list.setSpacing(2)
+            self.project_list.setGridSize(QSize(184, 266))
+            self.project_list.setUniformItemSizes(True)
+            self.project_list.setWordWrap(True)
+            self.project_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+            self.project_list.setItemDelegate(ProjectShelfDelegate(self.project_list))
             self.project_list.currentRowChanged.connect(lambda _row: self.select_project())
             left.addWidget(self.project_list, 1)
             left.addWidget(self._button("新建项目", self.start_new_project))
             left.addWidget(self._button("刷新项目", self.refresh_projects))
-            layout.addLayout(left, 1)
+            layout.addWidget(left_frame, 1.618)
 
-            right = QVBoxLayout()
+            right_frame = QFrame()
+            right_frame.setObjectName("ProjectDetailPane")
+            # 保证启动时项目书架左栏足够放下两张正常尺寸的书本卡片。
+            right_frame.setMinimumWidth(500)
+            right = QVBoxLayout(right_frame)
             form = QFormLayout()
             self.project_fields: dict[str, QLineEdit] = {}
             for label, key in [
@@ -239,6 +602,8 @@ if PYSIDE6_AVAILABLE:
             for label, key in PROJECT_TEXT_FIELDS:
                 right.addWidget(QLabel(label))
                 text = QTextEdit()
+                text.setObjectName("ProjectTextInput")
+                text.setPlaceholderText(f"请输入{label}")
                 text.setMinimumHeight(80)
                 self.project_texts[key] = text
                 right.addWidget(text)
@@ -250,7 +615,7 @@ if PYSIDE6_AVAILABLE:
             ]:
                 actions.addWidget(self._button(text, callback))
             right.addLayout(actions)
-            layout.addLayout(right, 2)
+            layout.addWidget(right_frame, 1)
 
         def _build_outline_page(self) -> None:
             page = self._add_page("总框架")
@@ -269,7 +634,9 @@ if PYSIDE6_AVAILABLE:
             layout.addLayout(left, 1)
             right = QSplitter(Qt.Orientation.Vertical)
             self.outline_text = QTextEdit()
+            self.outline_text.setObjectName("WritingEditor")
             self.outline_split_preview = QTextEdit()
+            self.outline_split_preview.setObjectName("StreamingOutput")
             self.outline_split_preview.setPlaceholderText("确认并拆分章节的流式输出")
             right.addWidget(self.outline_text)
             right.addWidget(self.outline_split_preview)
@@ -285,6 +652,7 @@ if PYSIDE6_AVAILABLE:
             self.world_kind.currentTextChanged.connect(lambda _text: self._on_world_kind_changed())
             left.addWidget(self.world_kind)
             self.world_list = QListWidget()
+            self.world_list.setObjectName("WorldList")
             self.world_list.currentRowChanged.connect(lambda _row: self.select_world_item())
             left.addWidget(self.world_list, 1)
             left.addWidget(self._button("刷新资料库", self.refresh_world_items))
@@ -313,9 +681,14 @@ if PYSIDE6_AVAILABLE:
         def _build_structure_page(self) -> None:
             page = self._add_page("章节")
             layout = QHBoxLayout(page)
-            left = QVBoxLayout()
-            left.addWidget(QLabel("章节"))
+            left_frame = QFrame()
+            left_frame.setObjectName("ChapterOutlinePane")
+            left = QVBoxLayout(left_frame)
+            chapter_title = QLabel("章节")
+            chapter_title.setObjectName("PanelTitle")
+            left.addWidget(chapter_title)
             self.chapter_list = QListWidget()
+            self.chapter_list.setObjectName("ChapterTree")
             self.chapter_list.currentRowChanged.connect(lambda _row: self.select_chapter())
             left.addWidget(self.chapter_list, 1)
             chapter_actions = QHBoxLayout()
@@ -327,8 +700,11 @@ if PYSIDE6_AVAILABLE:
             ]:
                 chapter_actions.addWidget(self._button(text, callback))
             left.addLayout(chapter_actions)
-            left.addWidget(QLabel("小节"))
+            section_title = QLabel("小节")
+            section_title.setObjectName("PanelTitle")
+            left.addWidget(section_title)
             self.section_list = QListWidget()
+            self.section_list.setObjectName("SectionList")
             self.section_list.currentRowChanged.connect(lambda _row: self.select_section())
             left.addWidget(self.section_list, 1)
             section_actions = QHBoxLayout()
@@ -345,9 +721,11 @@ if PYSIDE6_AVAILABLE:
             left.addWidget(self.structure_auto_next_chapter_enabled)
             left.addWidget(self._button("从当前小节自动化写作", self.start_chapter_automation))
             left.addWidget(self._button("中断自动化写作", self.interrupt_chapter_automation))
-            layout.addLayout(left, 1)
+            layout.addWidget(left_frame, 1)
 
-            right = QVBoxLayout()
+            right_frame = QFrame()
+            right_frame.setObjectName("ChapterEditorPane")
+            right = QVBoxLayout(right_frame)
             self.structure_fields: dict[str, Any] = {}
             form = QFormLayout()
             for label, key in [
@@ -382,8 +760,9 @@ if PYSIDE6_AVAILABLE:
             right.addLayout(action_row)
             right.addWidget(QLabel("写作参考资料"))
             self.world_context_text = QTextEdit()
+            self.world_context_text.setObjectName("WorldContext")
             right.addWidget(self.world_context_text, 1)
-            layout.addLayout(right, 2)
+            layout.addWidget(right_frame, 2)
 
         def _build_writing_page(self) -> None:
             page = self._add_page("写作")
@@ -413,14 +792,17 @@ if PYSIDE6_AVAILABLE:
             layout.addLayout(options)
             body = QSplitter(Qt.Orientation.Horizontal)
             self.version_list = QListWidget()
+            self.version_list.setObjectName("SectionList")
             self.version_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
             self.version_list.currentRowChanged.connect(lambda _row: self.show_selected_version())
             self.version_text = QTextEdit()
+            self.version_text.setObjectName("WritingEditor")
             body.addWidget(self.version_list)
             body.addWidget(self.version_text)
             layout.addWidget(body, 2)
             layout.addWidget(QLabel("当前流式生成内容"))
             self.current_generation_text = QTextEdit()
+            self.current_generation_text.setObjectName("StreamingOutput")
             layout.addWidget(self.current_generation_text, 1)
 
         def _build_settings_page(self) -> None:
@@ -493,6 +875,16 @@ if PYSIDE6_AVAILABLE:
                 return None
             return rows[row]
 
+        def _project_shelf_label(self, project: dict[str, Any]) -> str:
+            title = str(project.get("title", "") or "未命名项目").strip()
+            genre = str(project.get("genre", "") or "").strip()
+            style = str(project.get("style", "") or "").strip()
+            length_target = str(project.get("length_target", "") or "").strip()
+            metadata = " / ".join(part for part in [genre, style] if part) or "未设置题材"
+            if length_target:
+                metadata = f"{metadata} · {length_target}"
+            return f"{title}\n{metadata}"
+
         def refresh_projects(self) -> None:
             rebuild_cache = getattr(self.store, "rebuild_cache_from_project_files", None)
             if callable(rebuild_cache):
@@ -501,7 +893,10 @@ if PYSIDE6_AVAILABLE:
             self.projects = self.store.list_projects()
             self.project_list.clear()
             for project in self.projects:
-                item = QListWidgetItem(f"{project['id']} | {project['title']}")
+                item = QListWidgetItem(self._project_shelf_label(project))
+                item.setSizeHint(QSize(176, 252))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                item.setToolTip(f"{project['id']} | {project['title']}")
                 item.setData(Qt.ItemDataRole.UserRole, int(project["id"]))
                 self.project_list.addItem(item)
             if previous_project_id and project_index_by_id(self.projects, previous_project_id) is None:

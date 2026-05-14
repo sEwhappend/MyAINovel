@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from .llm import LLMClient, parse_json_response
-from .models import validate_world_kind
+from .models import WORLD_ITEM_KINDS, validate_world_kind
 from .prompts import SCHEMA_HINTS, build_messages, build_project_writing_constraints
 from .retrieval import retrieve_context
 from .review import build_rewrite_request, validate_review_issues
@@ -655,10 +655,34 @@ class NovelPipeline:
             "project": project,
             "project_length_target": project.get("length_target", ""),
         }
+        world_context = self.outline_world_context(project_id)
+        if world_context:
+            payload["outline_world_context"] = world_context
         main_character_cards = self.main_character_cards(project_id)
         if main_character_cards:
             payload["main_character_cards"] = main_character_cards
         return payload
+
+    def outline_world_context(self, project_id: int) -> dict[str, list[dict[str, Any]]]:
+        context: dict[str, list[dict[str, Any]]] = {}
+        for kind in sorted(WORLD_ITEM_KINDS):
+            entries: list[dict[str, Any]] = []
+            for item in self.store.list_world_items(project_id, kind):
+                details = self._loads(item.get("details_json"))
+                entry: dict[str, Any] = {
+                    "id": item.get("id"),
+                    "kind": item.get("kind", kind),
+                    "name": item.get("name", ""),
+                    "summary": item.get("summary", ""),
+                    "tags": item.get("tags", ""),
+                    "status": item.get("status", ""),
+                }
+                if details:
+                    entry["details"] = details
+                entries.append(entry)
+            if entries:
+                context[kind] = entries
+        return context
 
     def _outline_split_metadata(
         self,

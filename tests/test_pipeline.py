@@ -326,6 +326,51 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(card["motivation"], "寻找父亲失踪真相")
         self.assertEqual(card["modules"]["level_system"]["level"], 3)
 
+    def test_expand_global_concept_includes_all_world_items_when_database_exists(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "character",
+                "name": "林砚",
+                "summary": "失忆的调查员",
+                "details": {"identity": "调查员", "role_flags": {"protagonist": True}},
+                "tags": "主角",
+            },
+        )
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "location",
+                "name": "旧宅",
+                "summary": "雨夜中的核心地点",
+                "details": {"atmosphere": "潮湿压抑"},
+                "tags": "主舞台",
+            },
+        )
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "forbidden",
+                "name": "不能提前揭示真相",
+                "summary": "父亲失踪真相不能在大纲开头揭露",
+                "details": {"reason": "保持悬疑"},
+                "tags": "禁止事项",
+            },
+        )
+
+        pipeline.expand_global_concept(self.project_id)
+
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        context = payload["outline_world_context"]
+        self.assertEqual(context["character"][0]["name"], "林砚")
+        self.assertEqual(context["location"][0]["name"], "旧宅")
+        self.assertEqual(context["location"][0]["details"]["atmosphere"], "潮湿压抑")
+        self.assertEqual(context["forbidden"][0]["name"], "不能提前揭示真相")
+        self.assertEqual(payload["main_character_cards"][0]["name"], "林砚")
+
     def test_generate_default_main_character_saves_character_card(self) -> None:
         llm = InspectingFakeLLM()
         pipeline = NovelPipeline(self.store, llm)

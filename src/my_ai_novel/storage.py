@@ -37,7 +37,12 @@ def _json(value: Any) -> str:
 
 
 def _normalized_world_name(name: Any) -> str:
-    return str(name or "").strip().casefold()
+    text = str(name or "").strip().casefold()
+    text = re.sub(r"（[^）]*）|\([^)]*\)|\[[^\]]*\]|【[^】]*】", "", text)
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"^[：:【\[]?(主角|角色|人物|地点|场景|组织|势力|规则|设定|伏笔|时间线|事件|禁止事项)[：:】\]]?", "", text)
+    text = re.sub(r"[，,。.!！?？;；:：、·\-—_《》\"“”'‘’]", "", text)
+    return text
 
 
 def _merge_non_empty(existing: Any, incoming: Any) -> str:

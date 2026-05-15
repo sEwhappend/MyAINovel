@@ -611,9 +611,6 @@ if PYSIDE6_AVAILABLE:
                 ("题材", "genre"),
                 ("写作风格", "style"),
                 ("目标读者", "target_readers"),
-                ("总目标字数", "length_target"),
-                ("预计全书小节数", "estimated_total_sections"),
-                ("默认每小节目标字数", "default_section_target_words"),
                 ("叙事视角", "pov"),
             ]:
                 widget = QLineEdit()
@@ -650,8 +647,32 @@ if PYSIDE6_AVAILABLE:
             self.outline_page = page
             layout = QHBoxLayout(page)
             left = QVBoxLayout()
+            self.outline_mode = QComboBox()
+            self.outline_mode.addItems(["整书模式", "连载模式"])
+            self.outline_mode.currentTextChanged.connect(lambda _text: self._sync_outline_mode_fields())
+            left.addWidget(QLabel("规划模式"))
+            left.addWidget(self.outline_mode)
+            self.serial_action = QComboBox()
+            self.serial_action.addItems(["修改当前连载大纲", "生成下一部分大纲"])
+            self.serial_action.currentTextChanged.connect(lambda _text: self._sync_outline_mode_fields())
+            left.addWidget(QLabel("连载操作"))
+            left.addWidget(self.serial_action)
+            self.outline_planning_fields: dict[str, QLineEdit] = {}
+            for label, key in [
+                ("总目标字数/本次规划字数", "planning_target_words"),
+                ("预计全书/本次小节数", "planning_section_count"),
+                ("默认每小节目标字数", "default_section_target_words"),
+            ]:
+                left.addWidget(QLabel(label))
+                widget = QLineEdit()
+                self.outline_planning_fields[key] = widget
+                left.addWidget(widget)
+            left.addWidget(QLabel("本次规划说明"))
+            self.outline_planning_note = QTextEdit()
+            self.outline_planning_note.setMinimumHeight(72)
+            left.addWidget(self.outline_planning_note)
             for text, callback in [
-                ("丰满总体框架", self.expand_outline),
+                ("生成/修改大纲", self.expand_outline),
                 ("保存当前总框架修改", self.save_current_outline),
                 ("确认并拆分章节", self.confirm_outline_split),
             ]:
@@ -670,6 +691,7 @@ if PYSIDE6_AVAILABLE:
             right.addWidget(self.outline_text)
             right.addWidget(self.outline_split_preview)
             layout.addWidget(right, 2)
+            self._sync_outline_mode_fields()
 
         def _build_world_page(self) -> None:
             page = self._add_page("资料库")
@@ -918,6 +940,18 @@ if PYSIDE6_AVAILABLE:
             else:
                 widget.setText(text)
 
+        def _set_world_kind_safely(self, kind_or_label: Any) -> None:
+            raw_value = str(kind_or_label or "character")
+            kind = world_kind_value(raw_value)
+            label = world_kind_label(kind)
+            self._updating_world_kind = True
+            previous = self.world_kind.blockSignals(True)
+            try:
+                self.world_kind.setCurrentText(label)
+            finally:
+                self.world_kind.blockSignals(previous)
+                self._updating_world_kind = False
+
         def _project_tag_data(self) -> dict[str, str]:
             data: dict[str, str] = {}
             for field in FIELD_TO_CATEGORY:
@@ -1068,6 +1102,7 @@ if PYSIDE6_AVAILABLE:
             for key, widget in self.project_texts.items():
                 self._set_text(widget, project.get(key, ""))
             self._set_project_tag_data(project)
+            self._load_outline_planning_defaults(project)
             self._clear_project_views()
             self.refresh_all_project_views()
 
@@ -1082,6 +1117,7 @@ if PYSIDE6_AVAILABLE:
             for widget in self.project_texts.values():
                 self._set_text(widget, "")
             self._clear_project_tag_data()
+            self._clear_outline_planning_fields()
             self.project_list.clearSelection()
             self._clear_project_views()
             self._ok("已切换到新建项目")
@@ -1122,7 +1158,7 @@ if PYSIDE6_AVAILABLE:
             self.current_world_item_id = None
             self.current_world_details_json = ""
             if reset_kind:
-                self.world_kind.setCurrentText(world_kind_label("character"))
+                self._set_world_kind_safely("character")
             self.world_name.clear()
             self.world_tags.clear()
             self.world_summary.clear()
@@ -1240,12 +1276,6 @@ if PYSIDE6_AVAILABLE:
             if not data["title"]:
                 self._error("项目名称不能为空")
                 return
-            if not data.get("default_section_target_words"):
-                data["default_section_target_words"] = calculate_default_section_target_words(
-                    data.get("length_target"),
-                    data.get("estimated_total_sections"),
-                )
-                self._set_text(self.project_fields["default_section_target_words"], data["default_section_target_words"])
             if self.current_project_id:
                 self.store.update_project(self.current_project_id, data)
                 saved_project_id = self.current_project_id
@@ -1306,7 +1336,7 @@ if PYSIDE6_AVAILABLE:
             index = self.stack.indexOf(self.world_page)
             if index >= 0:
                 self.navigation.setCurrentRow(index)
-            self.world_kind.setCurrentText(world_kind_label("character"))
+            self._set_world_kind_safely("character")
             self._clear_world_form(reset_kind=False)
             self._sync_world_character_form_visibility()
             self.world_name.setFocus()
@@ -1326,7 +1356,7 @@ if PYSIDE6_AVAILABLE:
                 ensure_ascii=False,
                 indent=2,
             )
-            self.world_kind.setCurrentText(world_kind_label(str(item.get("kind", "character"))))
+            self._set_world_kind_safely(str(item.get("kind", "character")))
             self.world_name.setText(str(item.get("name", "")))
             self.world_tags.setText(str(item.get("tags", "")))
             self.world_summary.setPlainText(str(item.get("summary", "")))
@@ -1381,6 +1411,7 @@ if PYSIDE6_AVAILABLE:
             metadata = self._selected_outline_metadata()
             metadata["expanded_outline"] = content
             metadata["source"] = "manual_edit"
+            metadata["outline_planning"] = self._outline_planning_options()
             version_id = self.store.save_version(
                 {
                     "project_id": project_id,
@@ -1451,12 +1482,107 @@ if PYSIDE6_AVAILABLE:
                 return
             row = self.store.get_version(version_id)
             self.outline_text.setPlainText(row.get("content", "") if row else "")
+            metadata = self._loads(row.get("metadata_json")) if row else {}
+            if isinstance(metadata, dict):
+                self._apply_outline_planning_to_ui(metadata.get("outline_planning"))
 
         def _selected_outline_metadata(self) -> dict[str, Any]:
             version_id = self._selected_outline_version()
             row = self.store.get_version(version_id) if version_id else None
             metadata = self._loads(row.get("metadata_json")) if row else {}
             return metadata if isinstance(metadata, dict) else {}
+
+        def _outline_mode_value(self) -> str:
+            return "serial" if self.outline_mode.currentText() == "连载模式" else "full_book"
+
+        def _serial_action_value(self) -> str:
+            return "next_part" if self.serial_action.currentText() == "生成下一部分大纲" else "revise_current"
+
+        def _sync_outline_mode_fields(self) -> None:
+            if not hasattr(self, "serial_action"):
+                return
+            is_serial = self._outline_mode_value() == "serial"
+            self.serial_action.setEnabled(is_serial)
+            if not is_serial:
+                self.serial_action.setCurrentText("修改当前连载大纲")
+
+        def _clear_outline_planning_fields(self) -> None:
+            if not hasattr(self, "outline_planning_fields"):
+                return
+            self.outline_mode.setCurrentText("整书模式")
+            self.serial_action.setCurrentText("修改当前连载大纲")
+            for widget in self.outline_planning_fields.values():
+                self._set_text(widget, "")
+            self.outline_planning_note.clear()
+            self._sync_outline_mode_fields()
+
+        def _load_outline_planning_defaults(self, project: dict[str, Any]) -> None:
+            if not hasattr(self, "outline_planning_fields"):
+                return
+            self._apply_outline_planning_to_ui(
+                {
+                    "outline_mode": "full_book",
+                    "serial_action": "revise_current",
+                    "planning_target_words": project.get("length_target", ""),
+                    "planning_section_count": project.get("estimated_total_sections", ""),
+                    "default_section_target_words": project.get("default_section_target_words", ""),
+                    "planning_note": "",
+                }
+            )
+
+        def _apply_outline_planning_to_ui(self, planning: Any) -> None:
+            if not hasattr(self, "outline_planning_fields") or not isinstance(planning, dict):
+                return
+            self.outline_mode.setCurrentText("连载模式" if planning.get("outline_mode") == "serial" else "整书模式")
+            self.serial_action.setCurrentText("生成下一部分大纲" if planning.get("serial_action") == "next_part" else "修改当前连载大纲")
+            values = {
+                "planning_target_words": planning.get("planning_target_words", ""),
+                "planning_section_count": planning.get("planning_section_count", ""),
+                "default_section_target_words": planning.get("default_section_target_words", ""),
+            }
+            for key, value in values.items():
+                self._set_text(self.outline_planning_fields[key], value)
+            self.outline_planning_note.setPlainText(str(planning.get("planning_note", "") or ""))
+            self._sync_outline_mode_fields()
+            if not self._text(self.outline_planning_fields["default_section_target_words"]).strip():
+                default_words = calculate_default_section_target_words(
+                    self._text(self.outline_planning_fields["planning_target_words"]),
+                    self._text(self.outline_planning_fields["planning_section_count"]),
+                )
+                if default_words:
+                    self._set_text(self.outline_planning_fields["default_section_target_words"], default_words)
+
+        def _outline_planning_options(self) -> dict[str, Any]:
+            if not hasattr(self, "outline_planning_fields"):
+                return {"outline_mode": "full_book", "serial_action": "revise_current"}
+            target_words = self._text(self.outline_planning_fields["planning_target_words"]).strip()
+            section_count = self._text(self.outline_planning_fields["planning_section_count"]).strip()
+            default_words = self._text(self.outline_planning_fields["default_section_target_words"]).strip()
+            if not default_words:
+                default_words = calculate_default_section_target_words(target_words, section_count)
+                if default_words:
+                    self._set_text(self.outline_planning_fields["default_section_target_words"], default_words)
+            options: dict[str, Any] = {
+                "outline_mode": self._outline_mode_value(),
+                "serial_action": self._serial_action_value(),
+                "planning_target_words": target_words,
+                "planning_section_count": section_count,
+                "default_section_target_words": default_words,
+                "planning_note": self.outline_planning_note.toPlainText().strip(),
+            }
+            if options["outline_mode"] == "serial" and options["serial_action"] == "next_part":
+                next_number = self._next_chapter_number()
+                options["append_after_chapter_number"] = max(0, (next_number or 1) - 1)
+            return options
+
+        def _next_chapter_number(self) -> int:
+            if not self.current_project_id:
+                return 1
+            chapter_numbers = [
+                int(row.get("number", 0) or 0)
+                for row in self.store.list_chapters(self.current_project_id)
+            ]
+            return (max(chapter_numbers) + 1) if chapter_numbers else 1
 
         def _selected_outline_version(self) -> int | None:
             row = self._selected_row(self.outline_versions, self.outline_version_rows)
@@ -1506,6 +1632,8 @@ if PYSIDE6_AVAILABLE:
             self._ok("资料已删除")
 
         def _on_world_kind_changed(self) -> None:
+            if getattr(self, "_updating_world_kind", False):
+                return
             self._clear_world_form(reset_kind=False)
             self._sync_world_character_form_visibility()
             self.refresh_world_items()
@@ -1528,7 +1656,7 @@ if PYSIDE6_AVAILABLE:
                 return
             self.current_world_item_id = int(item["id"])
             self.current_world_details_json = item.get("details_json", "")
-            self.world_kind.setCurrentText(world_kind_label(item.get("kind", "character")))
+            self._set_world_kind_safely(item.get("kind", "character"))
             self.world_name.setText(item.get("name", ""))
             self.world_tags.setText(item.get("tags", ""))
             self.world_summary.setPlainText(item.get("summary", ""))
@@ -1813,9 +1941,10 @@ if PYSIDE6_AVAILABLE:
             }
 
         def _project_default_section_target_words(self) -> str:
-            value = self.project_fields["default_section_target_words"].text().strip()
-            if value:
-                return value
+            if hasattr(self, "outline_planning_fields") and "default_section_target_words" in self.outline_planning_fields:
+                value = self.outline_planning_fields["default_section_target_words"].text().strip()
+                if value:
+                    return value
             if not self.current_project_id:
                 return ""
             project = self.store.get_project(self.current_project_id) or {}
@@ -1916,14 +2045,15 @@ if PYSIDE6_AVAILABLE:
 
         def _run_streaming_outline(self, project_id: int) -> dict[str, Any]:
             self.bridge.stream.emit("outline", "")
+            planning_options = self._outline_planning_options()
 
             def on_delta(delta: str) -> None:
                 if delta:
                     self.bridge.stream.emit("outline", delta)
 
             if hasattr(self.pipeline, "expand_global_concept_streaming"):
-                return self.pipeline.expand_global_concept_streaming(project_id, on_delta)
-            result = self.pipeline.expand_global_concept(project_id)
+                return self.pipeline.expand_global_concept_streaming(project_id, on_delta, planning_options)
+            result = self.pipeline.expand_global_concept(project_id, planning_options)
             content = str(result.get("expanded_outline", "") or "")
             if content:
                 on_delta(content)

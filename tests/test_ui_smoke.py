@@ -172,8 +172,8 @@ class FakeStreamingPipeline:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
-    def expand_global_concept_streaming(self, project_id: int, on_delta) -> dict[str, object]:
-        self.calls.append(("stream_outline", project_id))
+    def expand_global_concept_streaming(self, project_id: int, on_delta, planning_options=None) -> dict[str, object]:
+        self.calls.append(("stream_outline", project_id, planning_options))
         on_delta("第一段")
         on_delta("第二段")
         return {"version_id": 101, "expanded_outline": "第一段第二段"}
@@ -1669,7 +1669,7 @@ class UISmokeTests(unittest.TestCase):
         result = ui._run_streaming_outline(42)
 
         self.assertEqual(result["expanded_outline"], "第一段第二段")
-        self.assertEqual(ui.pipeline.calls, [("stream_outline", 42)])
+        self.assertEqual(ui.pipeline.calls, [("stream_outline", 42, None)])
         self.assertEqual(ui.outline_text.get("1.0", "end"), "第一段第二段")
 
     def test_run_streaming_outline_split_resets_and_appends_preview_text(self) -> None:
@@ -1969,6 +1969,16 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("def _open_character_card_setup", source)
         self.assertIn("world_kind_label(\"character\")", source)
 
+    def test_pyside_world_kind_programmatic_updates_do_not_refresh_list(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _set_world_kind_safely", source)
+        self.assertIn("self._updating_world_kind = True", source)
+        self.assertIn("self.world_kind.blockSignals(True)", source)
+        self.assertIn("self.world_kind.blockSignals(previous)", source)
+        self.assertIn("if getattr(self, \"_updating_world_kind\", False):", source)
+        self.assertIn("self._set_world_kind_safely(str(item.get(\"kind\", \"character\")))", source)
+        self.assertIn("self._set_world_kind_safely(item.get(\"kind\", \"character\"))", source)
+
     def test_pyside_project_refresh_does_not_steal_saved_selection(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         self.assertIn("self.project_list.blockSignals(True)", source)
@@ -2000,6 +2010,25 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("self.pipeline.enrich_world_item(project_id, item_id, direction)", source)
         self.assertIn("self.pipeline.generate_world_item(project_id, kind)", source)
         self.assertNotIn("self.world_ai_direction = QTextEdit()", source)
+
+    def test_pyside_outline_page_owns_planning_mode_and_word_fields(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        project_block = source[source.index("def _build_project_page"):source.index("def _build_project_tag_controls")]
+        outline_block = source[source.index("def _build_outline_page"):source.index("def _build_world_page")]
+        self.assertNotIn('"length_target"', project_block)
+        self.assertNotIn('"estimated_total_sections"', project_block)
+        self.assertNotIn('"default_section_target_words"', project_block)
+        self.assertIn("self.outline_mode = QComboBox()", outline_block)
+        self.assertIn("整书模式", outline_block)
+        self.assertIn("连载模式", outline_block)
+        self.assertIn("self.serial_action = QComboBox()", outline_block)
+        self.assertIn("生成下一部分大纲", outline_block)
+        self.assertIn("self.outline_planning_fields", outline_block)
+        self.assertIn('"planning_target_words"', outline_block)
+        self.assertIn('"planning_section_count"', outline_block)
+        self.assertIn('"default_section_target_words"', outline_block)
+        self.assertIn("planning_options = self._outline_planning_options()", source)
+        self.assertIn("expand_global_concept_streaming(project_id, on_delta, planning_options)", source)
 
     def test_pyside_world_edit_dialogs_follow_main_window_size(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")

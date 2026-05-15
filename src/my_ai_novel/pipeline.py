@@ -14,6 +14,10 @@ from .world_modules import character_basic_fields_from_details, merge_module_pat
 
 
 DEFAULT_SECTION_TARGET_WORDS = 1200
+OUTLINE_MODE_FULL_BOOK = "full_book"
+OUTLINE_MODE_SERIAL = "serial"
+SERIAL_ACTION_REVISE_CURRENT = "revise_current"
+SERIAL_ACTION_NEXT_PART = "next_part"
 MIN_SECTION_TARGET_WORDS = 100
 
 
@@ -70,30 +74,38 @@ class NovelPipeline:
         self.store = store
         self.llm = llm
 
-    def expand_global_concept(self, project_id: int) -> dict[str, Any]:
+    def expand_global_concept(self, project_id: int, planning_options: dict[str, Any] | None = None) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
+        outline_planning = self._outline_planning(project, planning_options)
         result = self._outline_expansion_result(
             self._call(
                 "global_architect",
-                self._outline_expansion_payload(project_id, project),
+                self._outline_expansion_payload(project_id, project, outline_planning),
             )
         )
+        result["outline_planning"] = outline_planning
         content = result.get("expanded_outline") or json.dumps(result, ensure_ascii=False, indent=2)
         version_id = self.store.save_version(
             {
                 "project_id": project_id,
                 "kind": "global_outline",
-                "label": "丰满总体框架",
+                "label": self._outline_version_label(outline_planning),
                 "content": content,
                 "metadata": result,
             }
         )
         return {"version_id": version_id, **result}
 
-    def expand_global_concept_streaming(self, project_id: int, on_delta=None) -> dict[str, Any]:
+    def expand_global_concept_streaming(
+        self,
+        project_id: int,
+        on_delta=None,
+        planning_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
+        outline_planning = self._outline_planning(project, planning_options)
         payload = self._with_project_writing_constraints(
-            self._outline_expansion_payload(project_id, project)
+            self._outline_expansion_payload(project_id, project, outline_planning)
         )
         messages = build_messages("global_architect", payload, output_json=False)
         _append_to_first_system_before_user(
@@ -115,6 +127,7 @@ class NovelPipeline:
             if not raw:
                 raise ValueError("全书故事大纲为空")
             result = self._outline_expansion_result({"expanded_outline": raw, "source": "streaming_text"})
+            result["outline_planning"] = outline_planning
             self.store.save_llm_call_log(
                 {
                     "project_id": project_id,
@@ -143,7 +156,7 @@ class NovelPipeline:
             {
                 "project_id": project_id,
                 "kind": "global_outline",
-                "label": "丰满总体框架",
+                "label": self._outline_version_label(outline_planning),
                 "content": content,
                 "metadata": result,
             }
@@ -184,6 +197,7 @@ class NovelPipeline:
             text = self.llm.stream_text(model, messages, collect)
             raw = text or "".join(chunks)
             split_metadata = parse_json_response(raw)
+            split_metadata = self._with_split_planning(split_metadata, metadata)
             self.store.save_llm_call_log(
                 {
                     "project_id": project_id,
@@ -217,21 +231,43 @@ class NovelPipeline:
         split_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         chapters = split_metadata.get("chapters", [])
-        self._apply_section_word_budget(chapters, parse_length_target(project.get("length_target")))
-        self.store.reset_outline_split_content(project_id)
+        outline_planning = self._outline_planning(project, split_metadata.get("outline_planning"))
+        self._apply_section_word_budget(
+            chapters,
+            parse_length_target(outline_planning.get("planning_target_words")) or parse_length_target(project.get("length_target")),
+            parse_length_target(outline_planning.get("default_section_target_words")),
+        )
+        append_mode = (
+            outline_planning.get("outline_mode") == OUTLINE_MODE_SERIAL
+            and outline_planning.get("serial_action") == SERIAL_ACTION_NEXT_PART
+        )
+        chapter_offset = self._chapter_number_offset(project_id) if append_mode else 0
+        if not append_mode:
+            self.store.reset_outline_split_content(project_id)
         created_chapters = 0
         created_sections = 0
-        for chapter_data in chapters:
-            chapter_id = self.store.save_chapter(project_id, {**chapter_data, "status": "planned"})
+        for index, chapter_data in enumerate(chapters, 1):
+            chapter_number = chapter_offset + index if append_mode else chapter_data.get("number", index)
+            chapter_id = self.store.save_chapter(
+                project_id,
+                {**chapter_data, "number": chapter_number, "status": "planned"},
+            )
             created_chapters += 1
             for section_data in chapter_data.get("sections", []):
                 self.store.save_section(chapter_id, {**section_data, "status": "planned"})
                 created_sections += 1
         world_items = 0
-        for item in self._outline_world_item_candidates(split_metadata):
+        for item in self._outline_world_item_candidates(split_metadata, self._existing_world_item_keys(project_id)):
             self.store.upsert_world_item(project_id, item)
             world_items += 1
         return {"chapters": created_chapters, "sections": created_sections, "world_items": world_items}
+
+    def _chapter_number_offset(self, project_id: int) -> int:
+        chapter_numbers = [
+            int(chapter.get("number", 0) or 0)
+            for chapter in self.store.list_chapters(project_id)
+        ]
+        return max(chapter_numbers) if chapter_numbers else 0
 
     def enrich_world_item(self, project_id: int, item_id: int, direction: str = "") -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
@@ -650,10 +686,17 @@ class NovelPipeline:
             cards.append(card)
         return cards
 
-    def _outline_expansion_payload(self, project_id: int, project: dict[str, Any]) -> dict[str, Any]:
+    def _outline_expansion_payload(
+        self,
+        project_id: int,
+        project: dict[str, Any],
+        planning_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        outline_planning = self._outline_planning(project, planning_options)
         payload = {
             "project": project,
-            "project_length_target": project.get("length_target", ""),
+            "project_length_target": outline_planning.get("planning_target_words") or project.get("length_target", ""),
+            "outline_planning": outline_planning,
         }
         world_context = self.outline_world_context(project_id)
         if world_context:
@@ -662,6 +705,59 @@ class NovelPipeline:
         if main_character_cards:
             payload["main_character_cards"] = main_character_cards
         return payload
+
+    def _outline_planning(
+        self,
+        project: dict[str, Any],
+        planning_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raw = planning_options or {}
+        outline_mode = str(raw.get("outline_mode") or raw.get("mode") or OUTLINE_MODE_FULL_BOOK)
+        if outline_mode not in {OUTLINE_MODE_FULL_BOOK, OUTLINE_MODE_SERIAL}:
+            outline_mode = OUTLINE_MODE_FULL_BOOK
+        serial_action = str(raw.get("serial_action") or SERIAL_ACTION_REVISE_CURRENT)
+        if serial_action not in {SERIAL_ACTION_REVISE_CURRENT, SERIAL_ACTION_NEXT_PART}:
+            serial_action = SERIAL_ACTION_REVISE_CURRENT
+        planning_target_words = str(
+            raw.get("planning_target_words")
+            or raw.get("target_words")
+            or project.get("length_target", "")
+            or ""
+        ).strip()
+        planning_section_count = str(
+            raw.get("planning_section_count")
+            or raw.get("section_count")
+            or project.get("estimated_total_sections", "")
+            or ""
+        ).strip()
+        default_section_target_words = str(
+            raw.get("default_section_target_words")
+            or project.get("default_section_target_words", "")
+            or ""
+        ).strip()
+        if not default_section_target_words:
+            total = parse_length_target(planning_target_words)
+            sections = parse_length_target(planning_section_count)
+            if total and sections:
+                default_section_target_words = str(max(1, round(total / sections)))
+        planning = {
+            "outline_mode": outline_mode,
+            "serial_action": serial_action,
+            "planning_target_words": planning_target_words,
+            "planning_section_count": planning_section_count,
+            "default_section_target_words": default_section_target_words,
+            "planning_note": str(raw.get("planning_note") or "").strip(),
+        }
+        if raw.get("append_after_chapter_number") not in (None, ""):
+            planning["append_after_chapter_number"] = int(raw.get("append_after_chapter_number") or 0)
+        return planning
+
+    def _outline_version_label(self, outline_planning: dict[str, Any]) -> str:
+        if outline_planning.get("outline_mode") != OUTLINE_MODE_SERIAL:
+            return "全书故事大纲"
+        if outline_planning.get("serial_action") == SERIAL_ACTION_NEXT_PART:
+            return "下一部分连载大纲"
+        return "修改当前连载大纲"
 
     def outline_world_context(self, project_id: int) -> dict[str, list[dict[str, Any]]]:
         context: dict[str, list[dict[str, Any]]] = {}
@@ -693,16 +789,25 @@ class NovelPipeline:
         if isinstance(outline_metadata.get("chapters"), list):
             return outline_metadata
         result = self._call("outline_splitter", self._outline_split_payload(project, version, outline_metadata))
+        result = self._with_split_planning(result, outline_metadata)
         self._save_outline_split_version(int(project["id"]), result)
         return result
 
-    @staticmethod
+    def _with_split_planning(self, split_metadata: dict[str, Any], outline_metadata: dict[str, Any]) -> dict[str, Any]:
+        if split_metadata.get("outline_planning"):
+            return split_metadata
+        planning = outline_metadata.get("outline_planning")
+        if isinstance(planning, dict):
+            return {**split_metadata, "outline_planning": planning}
+        return split_metadata
+
     def _outline_split_payload(
+        self,
         project: dict[str, Any],
         version: dict[str, Any],
         outline_metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "project": project,
             "outline_version": {
                 "id": version.get("id"),
@@ -711,8 +816,17 @@ class NovelPipeline:
                 "metadata": outline_metadata,
             },
             "expanded_outline": version.get("content", ""),
-            "project_length_target": project.get("length_target", ""),
+            "project_length_target": (
+                outline_metadata.get("outline_planning", {}).get("planning_target_words")
+                if isinstance(outline_metadata.get("outline_planning"), dict)
+                else project.get("length_target", "")
+            ),
+            "outline_planning": outline_metadata.get("outline_planning", {}),
         }
+        world_context = self.outline_world_context(int(project["id"]))
+        if world_context:
+            payload["outline_world_context"] = world_context
+        return payload
 
     def _save_outline_split_version(self, project_id: int, split_metadata: dict[str, Any]) -> int:
         return self.store.save_version(
@@ -725,7 +839,11 @@ class NovelPipeline:
             }
         )
 
-    def _outline_world_item_candidates(self, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    def _outline_world_item_candidates(
+        self,
+        metadata: dict[str, Any],
+        existing_keys: set[tuple[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
         candidates: list[dict[str, Any]] = []
         source = "来自总体框架/章节拆分"
         candidates.extend(self._explicit_world_item_candidates(metadata.get("world_items"), source))
@@ -779,14 +897,35 @@ class NovelPipeline:
                         )
                     )
 
+        existing_keys = existing_keys or set()
         deduped: dict[tuple[str, str], dict[str, Any]] = {}
         for item in candidates:
             name = item.get("name", "").strip()
             if not name:
                 continue
-            key = (item.get("kind", ""), name.casefold())
+            key = (item.get("kind", ""), self._normalized_world_candidate_name(name))
+            if key in existing_keys:
+                continue
             deduped.setdefault(key, item)
         return list(deduped.values())
+
+    def _existing_world_item_keys(self, project_id: int) -> set[tuple[str, str]]:
+        keys: set[tuple[str, str]] = set()
+        for item in self.store.list_world_items(project_id):
+            kind = str(item.get("kind", "") or "")
+            name = self._normalized_world_candidate_name(item.get("name", ""))
+            if kind and name:
+                keys.add((kind, name))
+        return keys
+
+    @staticmethod
+    def _normalized_world_candidate_name(name: Any) -> str:
+        text = str(name or "").strip().casefold()
+        text = re.sub(r"（[^）]*）|\([^)]*\)|\[[^\]]*\]|【[^】]*】", "", text)
+        text = re.sub(r"\s+", "", text)
+        text = re.sub(r"^[：:【\[]?(主角|角色|人物|地点|场景|组织|势力|规则|设定|伏笔|时间线|事件|禁止事项)[：:】\]]?", "", text)
+        text = re.sub(r"[，,。.!！?？;；:：、·\-—_《》\"“”'‘’]", "", text)
+        return text
 
     def _latest_outline_snapshot(self, project_id: int) -> dict[str, Any]:
         versions = self.store.list_versions(project_id, kind="global_outline")
@@ -972,7 +1111,12 @@ class NovelPipeline:
                     items[item_id] = world_item
         return list(items.values())
 
-    def _apply_section_word_budget(self, chapters: Any, total_words: int | None) -> None:
+    def _apply_section_word_budget(
+        self,
+        chapters: Any,
+        total_words: int | None,
+        default_section_words: int | None = None,
+    ) -> None:
         sections: list[dict[str, Any]] = []
         if isinstance(chapters, list):
             for chapter in chapters:
@@ -986,12 +1130,16 @@ class NovelPipeline:
 
         if total_words is None:
             for section in sections:
-                target_words = parse_length_target(section.get("target_words")) or DEFAULT_SECTION_TARGET_WORDS
+                target_words = (
+                    parse_length_target(section.get("target_words"))
+                    or default_section_words
+                    or DEFAULT_SECTION_TARGET_WORDS
+                )
                 section["target_words"] = max(1, int(target_words))
             return
 
         weights = [
-            float(parse_length_target(section.get("target_words")) or 1)
+            float(parse_length_target(section.get("target_words")) or default_section_words or 1)
             for section in sections
         ]
         budgets = self._normalized_word_budgets(total_words, weights)

@@ -400,6 +400,37 @@ class PipelineTests(unittest.TestCase):
         split_metadata = json.loads(split_versions[0]["metadata_json"])
         self.assertEqual(split_metadata["chapters"][0]["title"], "旧宅")
 
+    def test_confirm_outline_split_payload_includes_world_context(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "location",
+                "name": "旧宅",
+                "summary": "雨夜中的核心地点",
+                "details": {"atmosphere": "潮湿压抑"},
+                "tags": "主舞台",
+                "status": "active",
+            },
+        )
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "待拆分大纲",
+                "content": "林砚进入旧宅。",
+                "metadata": {"expanded_outline": "林砚进入旧宅。"},
+            }
+        )
+
+        pipeline.confirm_outline_split(self.project_id, version_id)
+
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["outline_world_context"]["location"][0]["name"], "旧宅")
+        self.assertEqual(payload["outline_world_context"]["location"][0]["details"]["atmosphere"], "潮湿压抑")
+
     def test_confirm_outline_split_keeps_legacy_metadata_without_splitter_call(self) -> None:
         pipeline = NovelPipeline(self.store, LegacySplitFakeLLM())
         version_id = self.store.save_version(
@@ -747,6 +778,91 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("新角色", names)
         self.assertIn("新地点", names)
         self.assertIn("手动角色", names)
+
+    def test_confirm_outline_split_skips_existing_world_item_alias_candidates(self) -> None:
+        self.store.save_world_item(
+            self.project_id,
+            {
+                "kind": "character",
+                "name": "林砚",
+                "summary": "用户已有角色卡",
+                "details": {"source": "manual"},
+                "status": "active",
+            },
+        )
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "重复资料测试",
+                "content": "{}",
+                "metadata": {
+                    "world_items": [
+                        {"kind": "character", "name": "主角林砚（少年）", "summary": "重复候选"}
+                    ],
+                    "chapters": [],
+                },
+            }
+        )
+
+        split = self.pipeline.confirm_outline_split(self.project_id, version_id)
+
+        self.assertEqual(split["world_items"], 0)
+        items = self.store.list_world_items(self.project_id, "character")
+        self.assertEqual([item["name"] for item in items], ["林砚"])
+        self.assertEqual(items[0]["summary"], "用户已有角色卡")
+
+    def test_serial_next_outline_split_appends_after_existing_chapters(self) -> None:
+        existing_chapter_id = self.store.save_chapter(
+            self.project_id,
+            {"number": 1, "title": "已有章节", "status": "planned"},
+        )
+        self.store.save_section(existing_chapter_id, {"number": 1, "title": "已有小节", "target_words": 900})
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "下一部分连载大纲",
+                "content": "{}",
+                "metadata": {
+                    "outline_planning": {
+                        "outline_mode": "serial",
+                        "serial_action": "next_part",
+                        "planning_target_words": "6000",
+                        "planning_section_count": "3",
+                        "default_section_target_words": "2000",
+                    },
+                    "chapters": [
+                        {
+                            "number": 1,
+                            "title": "新增章节一",
+                            "sections": [{"number": 1, "title": "新增一节"}],
+                        },
+                        {
+                            "number": 2,
+                            "title": "新增章节二",
+                            "sections": [
+                                {"number": 1, "title": "新增二节"},
+                                {"number": 2, "title": "新增三节"},
+                            ],
+                        },
+                    ],
+                },
+            }
+        )
+
+        self.pipeline.confirm_outline_split(self.project_id, version_id)
+
+        chapters = self.store.list_chapters(self.project_id)
+        self.assertEqual([chapter["number"] for chapter in chapters], [1, 2, 3])
+        self.assertEqual([chapter["title"] for chapter in chapters], ["已有章节", "新增章节一", "新增章节二"])
+        all_sections = [
+            section
+            for chapter in chapters
+            for section in self.store.list_sections(chapter["id"])
+        ]
+        self.assertEqual([section["title"] for section in all_sections], ["已有小节", "新增一节", "新增二节", "新增三节"])
+        self.assertEqual(sum(section["target_words"] for section in all_sections if section["title"].startswith("新增")), 6000)
 
     def test_enrich_world_item_returns_editable_draft_without_saving(self) -> None:
         item_id = self.store.save_world_item(

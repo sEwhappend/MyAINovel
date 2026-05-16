@@ -724,30 +724,53 @@ class NovelPipeline:
             or project.get("length_target", "")
             or ""
         ).strip()
-        planning_section_count = str(
-            raw.get("planning_section_count")
+        planning_chapter_count = str(
+            raw.get("planning_chapter_count")
+            or raw.get("chapter_count")
+            or raw.get("planning_section_count")
             or raw.get("section_count")
             or project.get("estimated_total_sections", "")
             or ""
         ).strip()
-        default_section_target_words = str(
-            raw.get("default_section_target_words")
+        default_chapter_target_words = str(
+            raw.get("default_chapter_target_words")
+            or raw.get("default_chapter_words")
+            or raw.get("default_section_target_words")
             or project.get("default_section_target_words", "")
             or ""
         ).strip()
-        if not default_section_target_words:
+        if not default_chapter_target_words:
             total = parse_length_target(planning_target_words)
-            sections = parse_length_target(planning_section_count)
-            if total and sections:
-                default_section_target_words = str(max(1, round(total / sections)))
+            chapters = parse_length_target(planning_chapter_count)
+            if total and chapters:
+                default_chapter_target_words = str(max(1, round(total / chapters)))
         planning = {
             "outline_mode": outline_mode,
             "serial_action": serial_action,
             "planning_target_words": planning_target_words,
-            "planning_section_count": planning_section_count,
-            "default_section_target_words": default_section_target_words,
+            "planning_chapter_count": planning_chapter_count,
+            "default_chapter_target_words": default_chapter_target_words,
+            "section_count_approx": str(
+                raw.get("section_count_approx")
+                or raw.get("section_count")
+                or raw.get("section_count_min")
+                or raw.get("section_count_max")
+                or ""
+            ).strip(),
             "planning_note": str(raw.get("planning_note") or "").strip(),
         }
+        legacy_section_min = str(raw.get("section_count_min") or "").strip()
+        legacy_section_max = str(raw.get("section_count_max") or "").strip()
+        if legacy_section_min:
+            planning["section_count_min"] = legacy_section_min
+        if legacy_section_max:
+            planning["section_count_max"] = legacy_section_max
+        legacy_section_words = str(raw.get("default_section_target_words") or "").strip()
+        if legacy_section_words and not raw.get("default_chapter_target_words"):
+            planning["default_section_target_words"] = legacy_section_words
+        legacy_section_count = str(raw.get("planning_section_count") or raw.get("section_count") or "").strip()
+        if legacy_section_count and not raw.get("planning_chapter_count"):
+            planning["planning_section_count"] = legacy_section_count
         if raw.get("append_after_chapter_number") not in (None, ""):
             planning["append_after_chapter_number"] = int(raw.get("append_after_chapter_number") or 0)
         return planning

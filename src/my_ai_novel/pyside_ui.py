@@ -660,13 +660,16 @@ if PYSIDE6_AVAILABLE:
             self.outline_planning_fields: dict[str, QLineEdit] = {}
             for label, key in [
                 ("总目标字数/本次规划字数", "planning_target_words"),
-                ("预计全书/本次小节数", "planning_section_count"),
-                ("默认每小节目标字数", "default_section_target_words"),
+                ("预计全书/本次章节数", "planning_chapter_count"),
+                ("默认每章目标字数", "default_chapter_target_words"),
             ]:
                 left.addWidget(QLabel(label))
                 widget = QLineEdit()
                 self.outline_planning_fields[key] = widget
                 left.addWidget(widget)
+            left.addWidget(QLabel("单章节约几个小节"))
+            self.outline_planning_fields["section_count_approx"] = QLineEdit()
+            left.addWidget(self.outline_planning_fields["section_count_approx"])
             left.addWidget(QLabel("本次规划说明"))
             self.outline_planning_note = QTextEdit()
             self.outline_planning_note.setMinimumHeight(72)
@@ -1524,8 +1527,9 @@ if PYSIDE6_AVAILABLE:
                     "outline_mode": "full_book",
                     "serial_action": "revise_current",
                     "planning_target_words": project.get("length_target", ""),
-                    "planning_section_count": project.get("estimated_total_sections", ""),
-                    "default_section_target_words": project.get("default_section_target_words", ""),
+                    "planning_chapter_count": project.get("estimated_total_sections", ""),
+                    "default_chapter_target_words": project.get("default_section_target_words", ""),
+                    "section_count_approx": "",
                     "planning_note": "",
                 }
             )
@@ -1535,39 +1539,47 @@ if PYSIDE6_AVAILABLE:
                 return
             self.outline_mode.setCurrentText("连载模式" if planning.get("outline_mode") == "serial" else "整书模式")
             self.serial_action.setCurrentText("生成下一部分大纲" if planning.get("serial_action") == "next_part" else "修改当前连载大纲")
+            chapter_count = planning.get("planning_chapter_count", planning.get("planning_section_count", ""))
+            chapter_words = planning.get("default_chapter_target_words", planning.get("default_section_target_words", ""))
+            section_count_approx = planning.get(
+                "section_count_approx",
+                planning.get("section_count_min", planning.get("section_count_max", "")),
+            )
             values = {
                 "planning_target_words": planning.get("planning_target_words", ""),
-                "planning_section_count": planning.get("planning_section_count", ""),
-                "default_section_target_words": planning.get("default_section_target_words", ""),
+                "planning_chapter_count": chapter_count,
+                "default_chapter_target_words": chapter_words,
+                "section_count_approx": section_count_approx,
             }
             for key, value in values.items():
                 self._set_text(self.outline_planning_fields[key], value)
             self.outline_planning_note.setPlainText(str(planning.get("planning_note", "") or ""))
             self._sync_outline_mode_fields()
-            if not self._text(self.outline_planning_fields["default_section_target_words"]).strip():
+            if not self._text(self.outline_planning_fields["default_chapter_target_words"]).strip():
                 default_words = calculate_default_section_target_words(
                     self._text(self.outline_planning_fields["planning_target_words"]),
-                    self._text(self.outline_planning_fields["planning_section_count"]),
+                    self._text(self.outline_planning_fields["planning_chapter_count"]),
                 )
                 if default_words:
-                    self._set_text(self.outline_planning_fields["default_section_target_words"], default_words)
+                    self._set_text(self.outline_planning_fields["default_chapter_target_words"], default_words)
 
         def _outline_planning_options(self) -> dict[str, Any]:
             if not hasattr(self, "outline_planning_fields"):
                 return {"outline_mode": "full_book", "serial_action": "revise_current"}
             target_words = self._text(self.outline_planning_fields["planning_target_words"]).strip()
-            section_count = self._text(self.outline_planning_fields["planning_section_count"]).strip()
-            default_words = self._text(self.outline_planning_fields["default_section_target_words"]).strip()
-            if not default_words:
-                default_words = calculate_default_section_target_words(target_words, section_count)
-                if default_words:
-                    self._set_text(self.outline_planning_fields["default_section_target_words"], default_words)
+            chapter_count = self._text(self.outline_planning_fields["planning_chapter_count"]).strip()
+            default_chapter_words = self._text(self.outline_planning_fields["default_chapter_target_words"]).strip()
+            if not default_chapter_words:
+                default_chapter_words = calculate_default_section_target_words(target_words, chapter_count)
+                if default_chapter_words:
+                    self._set_text(self.outline_planning_fields["default_chapter_target_words"], default_chapter_words)
             options: dict[str, Any] = {
                 "outline_mode": self._outline_mode_value(),
                 "serial_action": self._serial_action_value(),
                 "planning_target_words": target_words,
-                "planning_section_count": section_count,
-                "default_section_target_words": default_words,
+                "planning_chapter_count": chapter_count,
+                "default_chapter_target_words": default_chapter_words,
+                "section_count_approx": self._text(self.outline_planning_fields["section_count_approx"]).strip(),
                 "planning_note": self.outline_planning_note.toPlainText().strip(),
             }
             if options["outline_mode"] == "serial" and options["serial_action"] == "next_part":

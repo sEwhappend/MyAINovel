@@ -580,6 +580,45 @@ class PipelineTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(parse_length_target(raw), expected)
 
+    def test_outline_planning_uses_chapter_count_and_section_range(self) -> None:
+        planning = self.pipeline._outline_planning(
+            {"length_target": "10万字"},
+            {
+                "planning_target_words": "100000",
+                "planning_chapter_count": "10",
+                "section_count_approx": "4",
+            },
+        )
+
+        self.assertEqual(planning["planning_chapter_count"], "10")
+        self.assertEqual(planning["default_chapter_target_words"], "10000")
+        self.assertEqual(planning["section_count_approx"], "4")
+        self.assertNotIn("default_section_target_words", planning)
+
+    def test_outline_planning_keeps_legacy_section_range_for_old_versions(self) -> None:
+        planning = self.pipeline._outline_planning(
+            {"length_target": "10万字"},
+            {"section_count_min": "3", "section_count_max": "5"},
+        )
+
+        self.assertEqual(planning["section_count_approx"], "3")
+        self.assertEqual(planning["section_count_min"], "3")
+        self.assertEqual(planning["section_count_max"], "5")
+
+    def test_outline_planning_keeps_legacy_section_fields_for_old_versions(self) -> None:
+        planning = self.pipeline._outline_planning(
+            {"length_target": "6000"},
+            {
+                "planning_section_count": "3",
+                "default_section_target_words": "2000",
+            },
+        )
+
+        self.assertEqual(planning["planning_chapter_count"], "3")
+        self.assertEqual(planning["default_chapter_target_words"], "2000")
+        self.assertEqual(planning["planning_section_count"], "3")
+        self.assertEqual(planning["default_section_target_words"], "2000")
+
     def test_confirm_outline_split_allocates_missing_section_targets(self) -> None:
         self.store.update_project(self.project_id, {"length_target": "8万字"})
         version_id = self.store.save_version(

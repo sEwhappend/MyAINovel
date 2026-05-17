@@ -62,6 +62,7 @@ try:
         QListWidgetItem,
         QMainWindow,
         QMessageBox,
+        QProgressBar,
         QPushButton,
         QSizePolicy,
         QSplitter,
@@ -106,6 +107,18 @@ def build_pyside_stylesheet() -> str:
         border: 1px solid #dce6f2;
         border-radius: 8px;
         color: #687589;
+    }
+    QProgressBar#LlmProgress {
+        min-height: 8px;
+        max-height: 8px;
+        border: 1px solid #dce6f2;
+        border-radius: 4px;
+        background: #ffffff;
+        text-align: center;
+    }
+    QProgressBar#LlmProgress::chunk {
+        border-radius: 4px;
+        background: #f6b7c9;
     }
     QFrame#ProjectShelfPane, QFrame#ProjectDetailPane, QFrame#ChapterOutlinePane, QFrame#ChapterEditorPane {
         background: #ffffff;
@@ -539,6 +552,12 @@ if PYSIDE6_AVAILABLE:
             self.status_label = QLabel("就绪")
             self.status_label.setObjectName("Status")
             layout.addWidget(self.status_label)
+            self.llm_progress = QProgressBar()
+            self.llm_progress.setObjectName("LlmProgress")
+            self.llm_progress.setRange(0, 0)
+            self.llm_progress.setTextVisible(False)
+            self.llm_progress.setVisible(False)
+            layout.addWidget(self.llm_progress)
             self.window.setCentralWidget(root)
 
             self._build_project_page()
@@ -2436,6 +2455,7 @@ if PYSIDE6_AVAILABLE:
                 self._error("已有后台任务运行中，请稍候")
                 return
             self._async_busy = True
+            self._set_llm_progress(True)
             self._ok(running)
 
             def worker() -> None:
@@ -2460,6 +2480,7 @@ if PYSIDE6_AVAILABLE:
                 if status_message:
                     self._ok(status_message)
             finally:
+                self._set_llm_progress(False)
                 self._async_busy = False
 
         def _complete_async_error(self, message: str) -> None:
@@ -2468,7 +2489,12 @@ if PYSIDE6_AVAILABLE:
                 self.refresh_logs()
                 self._error(message)
             finally:
+                self._set_llm_progress(False)
                 self._async_busy = False
+
+        def _set_llm_progress(self, active: bool) -> None:
+            if hasattr(self, "llm_progress"):
+                self.llm_progress.setVisible(active)
 
         def _ok(self, message: str) -> None:
             self.status_label.setText(message)

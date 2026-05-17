@@ -2034,6 +2034,16 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("planning_options = self._outline_planning_options()", source)
         self.assertIn("expand_global_concept_streaming(project_id, on_delta, planning_options)", source)
 
+    def test_pyside_bottom_progress_bar_tracks_async_llm_tasks(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("QProgressBar", source)
+        self.assertIn('self.llm_progress.setObjectName("LlmProgress")', source)
+        self.assertIn("self.llm_progress.setRange(0, 0)", source)
+        self.assertIn("self.llm_progress.setVisible(False)", source)
+        self.assertIn("def _set_llm_progress", source)
+        self.assertIn("self._set_llm_progress(True)", source)
+        self.assertGreaterEqual(source.count("self._set_llm_progress(False)"), 2)
+
     def test_pyside_world_edit_dialogs_follow_main_window_size(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         self.assertIn("def _resize_dialog_to_window", source)

@@ -340,7 +340,7 @@ if PYSIDE6_AVAILABLE:
 
 
     class ProjectShelfListWidget(QListWidget):
-        # 项目书架布局参数
+        # 项目书架布局参数:
         # GRID_WIDTH/GRID_HEIGHT 控制每一本书占用的格子大小。
         # TWO_COLUMN_MIN_WIDTH 控制书架从单列切换到双列的最小可用宽度。
         # EDGE_PADDING 和 SCROLLBAR_RESERVE 用来避免内容贴边或被滚动条挤压。

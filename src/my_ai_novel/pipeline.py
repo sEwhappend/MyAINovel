@@ -74,6 +74,75 @@ class NovelPipeline:
         self.store = store
         self.llm = llm
 
+    def generate_novel_candidates(self, generation_profile: dict[str, Any]) -> dict[str, Any]:
+        """Generate editable novel project candidates from search-style input."""
+        profile = dict(generation_profile or {})
+        result = self._call(
+            "novel_candidate_generator",
+            {
+                "generation_profile": profile,
+                "candidate_count": profile.get("candidate_count") or profile.get("count") or "3-6",
+            },
+        )
+        candidates = result.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+        return {**result, "candidates": candidates}
+
+    def candidate_to_project_draft(
+        self,
+        candidate: dict[str, Any],
+        generation_profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convert one generated candidate into editable project fields."""
+        profile = generation_profile or {}
+        selected_tags = profile.get("selected_tags") if isinstance(profile.get("selected_tags"), dict) else {}
+        normalized_tags = self._normalized_selected_tags(selected_tags)
+        tags = self._text_list(candidate.get("tags"))
+        stateful_requirements = self._text_list(candidate.get("stateful_requirements"))
+        risk_notes = self._text_list(candidate.get("risk_notes"))
+        forbidden_tags = normalized_tags.get("forbidden") or profile.get("exclude_tags") or []
+        forbidden = self._text_list(forbidden_tags)
+
+        style_parts = [
+            candidate.get("style_direction"),
+            self._joined(tags),
+        ]
+        writing_style_parts = [
+            candidate.get("style_direction"),
+            self._prefixed_lines("状态记忆要求", stateful_requirements),
+            self._prefixed_lines("风险提示", risk_notes),
+            self._prefixed_lines("排除项", forbidden),
+        ]
+        concept_parts = [
+            candidate.get("one_line_hook"),
+            candidate.get("story_start"),
+            candidate.get("world_direction"),
+            candidate.get("main_character_direction"),
+            candidate.get("relationship_direction"),
+        ]
+
+        draft = {
+            "title": str(candidate.get("temporary_title") or "").strip(),
+            "genre": self._joined(normalized_tags.get("genre")) or self._joined(tags),
+            "style": self._joined(part for part in style_parts if part),
+            "target_readers": str(candidate.get("target_readers") or profile.get("reader_target") or "").strip(),
+            "length_target": str(profile.get("planning_target_words") or profile.get("length_target") or "").strip(),
+            "pov": str(candidate.get("pov") or profile.get("pov") or "").strip(),
+            "selected_genre_tags": self._text_list(normalized_tags.get("genre")),
+            "selected_setting_tags": self._text_list(normalized_tags.get("setting")),
+            "selected_character_tags": self._text_list(normalized_tags.get("character")),
+            "selected_structure_tags": self._text_list(normalized_tags.get("structure")),
+            "selected_style_tags": self._text_list(normalized_tags.get("style")),
+            "selected_forbidden_tags": self._text_list(normalized_tags.get("forbidden")),
+            "dialogue_quote_style": self._dialogue_quote_style(profile, normalized_tags),
+            "world_summary": str(candidate.get("world_direction") or "").strip(),
+            "character_brief": str(candidate.get("main_character_direction") or "").strip(),
+            "writing_style_guide": "\n".join(part for part in writing_style_parts if part),
+            "global_concept": "\n".join(str(part).strip() for part in concept_parts if str(part or "").strip()),
+        }
+        return draft
+
     def expand_global_concept(self, project_id: int, planning_options: dict[str, Any] | None = None) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
         outline_planning = self._outline_planning(project, planning_options)
@@ -1249,6 +1318,67 @@ class NovelPipeline:
                     merged.append(clean)
                     seen.add(key)
         return ",".join(merged)
+
+    @staticmethod
+    def _text_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            parts = re.split(r"[,，、\n]+", value)
+            return [part.strip() for part in parts if part.strip()]
+        if isinstance(value, dict):
+            return [
+                str(value.get(key, "")).strip()
+                for key in ("id", "label", "name")
+                if str(value.get(key, "")).strip()
+            ][:1]
+        if isinstance(value, (list, tuple, set)):
+            result: list[str] = []
+            for item in value:
+                result.extend(NovelPipeline._text_list(item))
+            return result
+        text = str(value).strip()
+        return [text] if text else []
+
+    @staticmethod
+    def _joined(value: Any, separator: str = "、") -> str:
+        items: list[str] = []
+        seen: set[str] = set()
+        for item in NovelPipeline._text_list(value):
+            key = item.casefold()
+            if key not in seen:
+                items.append(item)
+                seen.add(key)
+        return separator.join(items)
+
+    @staticmethod
+    def _prefixed_lines(title: str, items: list[str]) -> str:
+        if not items:
+            return ""
+        return f"{title}：\n" + "\n".join(f"- {item}" for item in items)
+
+    @staticmethod
+    def _dialogue_quote_style(profile: dict[str, Any], selected_tags: dict[str, Any]) -> str:
+        explicit = str(profile.get("dialogue_quote_style") or "").strip()
+        if explicit:
+            return explicit
+        style_tags = set(NovelPipeline._text_list(selected_tags.get("style")))
+        if "corner_quotes" in style_tags:
+            return "corner_quotes"
+        if "cn_quotes" in style_tags:
+            return "cn_quotes"
+        return "cn_quotes"
+
+    @staticmethod
+    def _normalized_selected_tags(selected_tags: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "genre": selected_tags.get("genre", selected_tags.get("selected_genre_tags", [])),
+            "setting": selected_tags.get("setting", selected_tags.get("selected_setting_tags", [])),
+            "character": selected_tags.get("character", selected_tags.get("selected_character_tags", [])),
+            "structure": selected_tags.get("structure", selected_tags.get("selected_structure_tags", [])),
+            "style": selected_tags.get("style", selected_tags.get("selected_style_tags", [])),
+            "forbidden": selected_tags.get("forbidden", selected_tags.get("selected_forbidden_tags", [])),
+        }
 
     @staticmethod
     def _first_text(data: dict[str, Any], keys: tuple[str, ...]) -> str:

@@ -103,6 +103,28 @@ class FakeLLM:
                 "tags": "主角",
                 "status": "candidate",
             }
+        if agent_name == "novel_candidate_generator":
+            return {
+                "candidates": [
+                    {
+                        "temporary_title": "穿过钟楼的异乡少女",
+                        "one_line_hook": "不擅长战斗的转移者被迫用记录能力拆解异世界谎言。",
+                        "tags": ["日式轻小说", "异世界转移", "等级体系", "轻悬疑"],
+                        "target_readers": "青少年",
+                        "pov": "第三人称有限视角",
+                        "story_start": "主角在风车镇醒来，发现自己的身份记录被公共石碑写错。",
+                        "main_character_direction": "谨慎、弱战斗力、擅长观察，初期目标只是回家。",
+                        "world_direction": "西式幻想世界，身份、职业和等级会被公共石碑记录。",
+                        "relationship_direction": "主角与本地少女从互相戒备转为利益同盟。",
+                        "style_direction": "轻小说式对白，悬疑推进，不强行设置反派势力。",
+                        "stateful_requirements": [
+                            "等级变化必须写入角色卡",
+                            "身份记录变化必须持续记忆",
+                        ],
+                        "risk_notes": ["等级体系容易遗忘，需要章末回写角色状态"],
+                    }
+                ]
+            }
         if agent_name == "chapter_memory_writer":
             return {
                 "world_items": [
@@ -215,6 +237,69 @@ class PipelineTests(unittest.TestCase):
         self.store = NovelStore(TEST_OUTPUT / f"pipeline_{uuid.uuid4().hex}.db")
         self.project_id = self.store.create_project({"title": "测试", "global_concept": "旧宅"})
         self.pipeline = NovelPipeline(self.store, FakeLLM())
+
+    def test_generate_novel_candidates_uses_search_profile_and_schema(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        profile = {
+            "search_query": "异世界转移 TS 等级成长 轻小说",
+            "selected_tags": {
+                "genre": ["fantasy"],
+                "setting": ["isekai_transfer", "level_system"],
+                "style": ["jp_light_novel"],
+                "forbidden": ["no_harem"],
+            },
+            "exclude_tags": ["grimdark"],
+            "reader_target": "青少年",
+            "pov": "第三人称有限视角",
+            "planning_target_words": "30000",
+        }
+
+        result = pipeline.generate_novel_candidates(profile)
+
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["temporary_title"], "穿过钟楼的异乡少女")
+        self.assertIn("risk_notes", candidate)
+        self.assertEqual(llm.calls[0]["agent_name"], "novel_candidate_generator")
+        self.assertIn("candidates", llm.calls[0]["schema_hint"])
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["generation_profile"]["search_query"], profile["search_query"])
+        self.assertEqual(payload["candidate_count"], "3-6")
+
+    def test_candidate_to_project_draft_maps_editable_project_fields(self) -> None:
+        profile = {
+            "selected_tags": {
+                "genre": ["fantasy"],
+                "setting": ["isekai_transfer", "level_system"],
+                "structure": ["main_plot_driven"],
+                "style": ["jp_light_novel", "corner_quotes"],
+                "forbidden": ["no_harem"],
+            },
+            "planning_target_words": "30000",
+            "reader_target": "青少年",
+            "pov": "第三人称有限视角",
+        }
+        candidate = FakeLLM().chat_json("novel_candidate_generator", [], {})["candidates"][0]
+
+        draft = self.pipeline.candidate_to_project_draft(candidate, profile)
+
+        self.assertEqual(draft["title"], "穿过钟楼的异乡少女")
+        self.assertEqual(draft["genre"], "fantasy")
+        self.assertEqual(draft["target_readers"], "青少年")
+        self.assertEqual(draft["length_target"], "30000")
+        self.assertEqual(draft["pov"], "第三人称有限视角")
+        self.assertEqual(draft["selected_genre_tags"], ["fantasy"])
+        self.assertEqual(draft["selected_setting_tags"], ["isekai_transfer", "level_system"])
+        self.assertEqual(draft["selected_structure_tags"], ["main_plot_driven"])
+        self.assertEqual(draft["selected_style_tags"], ["jp_light_novel", "corner_quotes"])
+        self.assertEqual(draft["dialogue_quote_style"], "corner_quotes")
+        self.assertIn("西式幻想世界", draft["world_summary"])
+        self.assertIn("谨慎", draft["character_brief"])
+        self.assertIn("状态记忆要求", draft["writing_style_guide"])
+        self.assertIn("排除项", draft["writing_style_guide"])
+        self.assertIn("公共石碑", draft["global_concept"])
 
     def test_outline_split_draft_review_rewrite_flow(self) -> None:
         outline = self.pipeline.expand_global_concept(self.project_id)

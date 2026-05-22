@@ -174,6 +174,28 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(json.loads(project_json["selected_setting_tags"]), ["skill_system", "ts"])
         self.assertEqual(project_json["dialogue_quote_style"], "cn_quotes")
 
+    def test_generation_profile_round_trip_to_project_json(self) -> None:
+        profile = {
+            "creation_mode": "candidate",
+            "search_query": "异世界转移 等级成长",
+            "selected_candidate": {"temporary_title": "钟楼异乡人"},
+        }
+        project_id = self.store.create_project(
+            {
+                "title": "搜索式项目",
+                "generation_profile_json": profile,
+            }
+        )
+
+        project = self.store.get_project(project_id)
+        self.assertEqual(json.loads(project["generation_profile_json"])["search_query"], "异世界转移 等级成长")
+
+        self.store.update_project(project_id, {"generation_profile_json": {"creation_mode": "manual"}})
+        project = self.store.get_project(project_id)
+        self.assertEqual(json.loads(project["generation_profile_json"])["creation_mode"], "manual")
+        project_json = json.loads((self._project_dir(project_id) / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(project_json["generation_profile_json"])["creation_mode"], "manual")
+
     def test_move_section_reorders_and_renumbers_chapter_sections(self) -> None:
         project_id = self.store.create_project({"title": "小节排序"})
         chapter_id = self.store.save_chapter(project_id, {"number": 1, "title": "章节"})

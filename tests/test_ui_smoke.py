@@ -1987,6 +1987,26 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("self.current_project_id = saved_project_id", source)
         self.assertIn("self.select_project_by_id(saved_project_id)", source)
 
+    def test_pyside_project_page_has_search_creation_entry(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        project_block = source[source.index("def _build_project_page"):source.index("def _build_project_tag_controls")]
+        self.assertIn("新建空白项目", project_block)
+        self.assertIn("像找小说一样创建", project_block)
+        self.assertIn("open_search_project_creation_dialog", project_block)
+
+    def test_pyside_search_creation_dialog_generates_and_applies_candidates(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("class SearchProjectCreationDialog(QDialog)", source)
+        self.assertIn("搜索式需求", source)
+        self.assertIn("打开现有标签选择", source)
+        self.assertIn("生成候选", source)
+        self.assertIn("用这个创建项目", source)
+        self.assertIn("def _generate_search_creation_candidates", source)
+        self.assertIn("hasattr", source)
+        self.assertIn("def _apply_search_candidate_to_project", source)
+        self.assertIn("self.current_project_id = None", source)
+        self.assertIn("尚未保存", source)
+
     def test_pyside_character_summary_does_not_expand_world_layout_width(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         self.assertIn("self.character_basic_summary.setWordWrap(True)", source)

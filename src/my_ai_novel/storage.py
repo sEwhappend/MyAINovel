@@ -184,9 +184,12 @@ class NovelStore:
             "pov": "",
             "selected_genre_tags": "[]",
             "selected_setting_tags": "[]",
+            "selected_character_tags": "[]",
             "selected_structure_tags": "[]",
             "selected_style_tags": "[]",
+            "selected_forbidden_tags": "[]",
             "dialogue_quote_style": "cn_quotes",
+            "generation_profile_json": "",
             "world_summary": "",
             "character_brief": "",
             "writing_style_guide": "",
@@ -196,6 +199,7 @@ class NovelStore:
         for key in PROJECT_STYLE_TAG_FIELDS:
             fields[key] = dump_tag_ids(fields.get(key))
         fields["dialogue_quote_style"] = str(fields.get("dialogue_quote_style") or "cn_quotes")
+        fields["generation_profile_json"] = _json(fields.get("generation_profile_json"))
         _apply_project_word_defaults(fields)
         with self.connection() as conn:
             cur = conn.execute(
@@ -204,10 +208,12 @@ class NovelStore:
                     title, genre, style, target_readers, length_target,
                     estimated_total_sections, default_section_target_words, pov,
                     selected_genre_tags, selected_setting_tags,
-                    selected_structure_tags, selected_style_tags, dialogue_quote_style,
+                    selected_character_tags, selected_structure_tags,
+                    selected_style_tags, selected_forbidden_tags, dialogue_quote_style,
+                    generation_profile_json,
                     world_summary, character_brief, writing_style_guide,
                     global_concept, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 """,
                 tuple(fields[name] for name in fields),
             )
@@ -227,9 +233,12 @@ class NovelStore:
             "pov",
             "selected_genre_tags",
             "selected_setting_tags",
+            "selected_character_tags",
             "selected_structure_tags",
             "selected_style_tags",
+            "selected_forbidden_tags",
             "dialogue_quote_style",
+            "generation_profile_json",
             "world_summary",
             "character_brief",
             "writing_style_guide",
@@ -243,6 +252,8 @@ class NovelStore:
                 updates[key] = dump_tag_ids(updates.get(key))
         if "dialogue_quote_style" in updates:
             updates["dialogue_quote_style"] = str(updates.get("dialogue_quote_style") or "cn_quotes")
+        if "generation_profile_json" in updates:
+            updates["generation_profile_json"] = _json(updates.get("generation_profile_json"))
         current = self.get_project(project_id) or {}
         merged = dict(current)
         merged.update(updates)
@@ -872,6 +883,7 @@ class NovelStore:
         for key in PROJECT_STYLE_TAG_FIELDS:
             project[key] = dump_tag_ids(project.get(key))
         project["dialogue_quote_style"] = str(project.get("dialogue_quote_style") or "cn_quotes")
+        project["generation_profile_json"] = _json(project.get("generation_profile_json"))
         project_id = int(project["id"])
         conn.execute(
             """
@@ -879,10 +891,12 @@ class NovelStore:
                 id, title, genre, style, target_readers, length_target,
                 estimated_total_sections, default_section_target_words, pov,
                 selected_genre_tags, selected_setting_tags,
-                selected_structure_tags, selected_style_tags, dialogue_quote_style,
+                selected_character_tags, selected_structure_tags,
+                selected_style_tags, selected_forbidden_tags, dialogue_quote_style,
+                generation_profile_json,
                 world_summary, character_brief, writing_style_guide,
                 global_concept, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -896,9 +910,12 @@ class NovelStore:
                 project.get("pov", ""),
                 project.get("selected_genre_tags", "[]"),
                 project.get("selected_setting_tags", "[]"),
+                project.get("selected_character_tags", "[]"),
                 project.get("selected_structure_tags", "[]"),
                 project.get("selected_style_tags", "[]"),
+                project.get("selected_forbidden_tags", "[]"),
                 project.get("dialogue_quote_style", "cn_quotes"),
+                project.get("generation_profile_json", ""),
                 project.get("world_summary", ""),
                 project.get("character_brief", ""),
                 project.get("writing_style_guide", ""),
@@ -1222,9 +1239,12 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
                 pov TEXT NOT NULL DEFAULT '',
                 selected_genre_tags TEXT NOT NULL DEFAULT '[]',
                 selected_setting_tags TEXT NOT NULL DEFAULT '[]',
+                selected_character_tags TEXT NOT NULL DEFAULT '[]',
                 selected_structure_tags TEXT NOT NULL DEFAULT '[]',
                 selected_style_tags TEXT NOT NULL DEFAULT '[]',
+                selected_forbidden_tags TEXT NOT NULL DEFAULT '[]',
                 dialogue_quote_style TEXT NOT NULL DEFAULT 'cn_quotes',
+                generation_profile_json TEXT NOT NULL DEFAULT '',
                 world_summary TEXT NOT NULL DEFAULT '',
                 character_brief TEXT NOT NULL DEFAULT '',
                 writing_style_guide TEXT NOT NULL DEFAULT '',
@@ -1330,9 +1350,12 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             _ensure_column(conn, "projects", "default_section_target_words", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(conn, "projects", "selected_genre_tags", "TEXT NOT NULL DEFAULT '[]'")
             _ensure_column(conn, "projects", "selected_setting_tags", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "projects", "selected_character_tags", "TEXT NOT NULL DEFAULT '[]'")
             _ensure_column(conn, "projects", "selected_structure_tags", "TEXT NOT NULL DEFAULT '[]'")
             _ensure_column(conn, "projects", "selected_style_tags", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "projects", "selected_forbidden_tags", "TEXT NOT NULL DEFAULT '[]'")
             _ensure_column(conn, "projects", "dialogue_quote_style", "TEXT NOT NULL DEFAULT 'cn_quotes'")
+            _ensure_column(conn, "projects", "generation_profile_json", "TEXT NOT NULL DEFAULT ''")
     finally:
         conn.close()
 

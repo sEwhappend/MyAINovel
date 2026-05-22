@@ -492,6 +492,172 @@ if PYSIDE6_AVAILABLE:
             painter.restore()
 
 
+    class SearchProjectCreationDialog(QDialog):
+        def __init__(self, owner: "NovelDesktopUI") -> None:
+            super().__init__(owner.window)
+            self.owner = owner
+            self.candidates: list[dict[str, Any]] = []
+            self.tag_checks: dict[str, dict[str, QCheckBox]] = {}
+            self.setWindowTitle("像找小说一样创建项目")
+            layout = QVBoxLayout(self)
+            self.query_input = QLineEdit()
+            self.query_input.setPlaceholderText("输入想看/想写的小说方向，例如：异世界转移 TS 等级成长 轻小说 不要后宫")
+            layout.addWidget(QLabel("搜索式需求"))
+            layout.addWidget(self.query_input)
+
+            controls = QHBoxLayout()
+            self.reader_combo = QComboBox()
+            self.reader_combo.addItems(["青少年向", "少女向", "青年向", "轻小说向", "成人向"])
+            self.pov_combo = QComboBox()
+            self.pov_combo.addItems(["第三人称有限视角", "第一人称", "多视角", "主角视角"])
+            controls.addWidget(QLabel("读者"))
+            controls.addWidget(self.reader_combo)
+            controls.addWidget(QLabel("视角"))
+            controls.addWidget(self.pov_combo)
+            controls.addStretch(1)
+            layout.addLayout(controls)
+
+            body = QHBoxLayout()
+            filter_column = QVBoxLayout()
+            filter_column.addWidget(QLabel("标签/排除项"))
+            self._build_tag_checks(filter_column)
+            self.exclude_input = QLineEdit()
+            self.exclude_input.setPlaceholderText("排除项，用逗号分隔，例如：不要系统,不要后宫")
+            filter_column.addWidget(QLabel("排除项"))
+            filter_column.addWidget(self.exclude_input)
+            open_tags = QPushButton("打开现有标签选择")
+            open_tags.clicked.connect(self._open_existing_tag_selector)
+            filter_column.addWidget(open_tags)
+            filter_column.addStretch(1)
+            body.addLayout(filter_column, 1)
+
+            result_column = QVBoxLayout()
+            self.candidate_list = QListWidget()
+            self.candidate_list.currentRowChanged.connect(lambda _row: self._show_candidate_detail())
+            generate_button = QPushButton("生成候选")
+            generate_button.setProperty("primary", True)
+            generate_button.clicked.connect(self._generate_candidates)
+            result_column.addWidget(generate_button)
+            result_column.addWidget(QLabel("候选方案"))
+            result_column.addWidget(self.candidate_list, 1)
+            body.addLayout(result_column, 1)
+
+            detail_column = QVBoxLayout()
+            self.detail_text = QTextEdit()
+            self.detail_text.setReadOnly(True)
+            use_button = QPushButton("用这个创建项目")
+            use_button.setProperty("primary", True)
+            use_button.clicked.connect(self._use_selected_candidate)
+            similar_button = QPushButton("生成相似方案")
+            similar_button.clicked.connect(self._generate_candidates)
+            detail_column.addWidget(QLabel("详情与操作"))
+            detail_column.addWidget(self.detail_text, 1)
+            detail_column.addWidget(use_button)
+            detail_column.addWidget(similar_button)
+            body.addLayout(detail_column, 1)
+            layout.addLayout(body, 1)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(self.reject)
+            layout.addWidget(buttons)
+            owner._resize_dialog_to_window(self)
+
+        def _build_tag_checks(self, layout: QVBoxLayout) -> None:
+            catalog = list_style_tag_catalog()
+            labels = {
+                "selected_genre_tags": "题材标签",
+                "selected_setting_tags": "设定标签",
+                "selected_structure_tags": "结构标签",
+                "selected_style_tags": "风格标签",
+            }
+            for field, category in FIELD_TO_CATEGORY.items():
+                layout.addWidget(QLabel(labels.get(field, field)))
+                row = QVBoxLayout()
+                self.tag_checks[field] = {}
+                selected = set(getattr(self.owner, "project_tag_selection", {}).get(field, []))
+                for tag in catalog.get(category, []):
+                    tag_id = str(tag.get("id", ""))
+                    checkbox = QCheckBox(str(tag.get("label", tag_id)))
+                    checkbox.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
+                    checkbox.setChecked(tag_id in selected)
+                    self.tag_checks[field][tag_id] = checkbox
+                    row.addWidget(checkbox)
+                layout.addLayout(row)
+
+        def _open_existing_tag_selector(self) -> None:
+            self.owner.edit_project_tags_dialog()
+            current = getattr(self.owner, "project_tag_selection", {})
+            for field, field_checks in self.tag_checks.items():
+                selected = set(current.get(field, []))
+                for tag_id, checkbox in field_checks.items():
+                    checkbox.setChecked(tag_id in selected)
+
+        def _generation_profile(self) -> dict[str, Any]:
+            return {
+                "search_query": self.query_input.text().strip(),
+                "selected_tags": {
+                    field: [tag_id for tag_id, checkbox in checks.items() if checkbox.isChecked()]
+                    for field, checks in self.tag_checks.items()
+                },
+                "exclude_tags": [
+                    item.strip()
+                    for item in self.exclude_input.text().replace("，", ",").split(",")
+                    if item.strip()
+                ],
+                "target_readers": self.reader_combo.currentText().strip(),
+                "pov": self.pov_combo.currentText().strip(),
+            }
+
+        def _generate_candidates(self) -> None:
+            profile = self._generation_profile()
+            self.candidates = self.owner._generate_search_creation_candidates(profile)
+            self.candidate_list.clear()
+            for candidate in self.candidates:
+                title = str(candidate.get("temporary_title") or candidate.get("title") or "未命名候选")
+                hook = str(candidate.get("one_line_hook") or candidate.get("hook") or "")
+                self.candidate_list.addItem(f"{title}\n{hook}")
+            if self.candidates:
+                self.candidate_list.setCurrentRow(0)
+
+        def _show_candidate_detail(self) -> None:
+            candidate = self.owner._selected_row(self.candidate_list, self.candidates)
+            if not candidate:
+                self.detail_text.setPlainText("")
+                return
+            tags = candidate.get("tags", [])
+            if isinstance(tags, list):
+                tags_text = "、".join(str(tag) for tag in tags)
+            else:
+                tags_text = str(tags or "")
+            lines = [
+                str(candidate.get("temporary_title") or candidate.get("title") or "未命名候选"),
+                str(candidate.get("one_line_hook") or ""),
+                f"标签：{tags_text}",
+                f"读者：{candidate.get('target_readers', '')}",
+                f"视角：{candidate.get('pov', '')}",
+                "",
+                f"故事开局：{candidate.get('story_start', '')}",
+                f"世界方向：{candidate.get('world_direction', '')}",
+                f"主角方向：{candidate.get('main_character_direction', '')}",
+                f"关系方向：{candidate.get('relationship_direction', '')}",
+                f"风格方向：{candidate.get('style_direction', '')}",
+                "",
+                "状态记忆要求：",
+                *[f"- {item}" for item in candidate.get("stateful_requirements", [])],
+                "风险提示：",
+                *[f"- {item}" for item in candidate.get("risk_notes", [])],
+            ]
+            self.detail_text.setPlainText("\n".join(lines))
+
+        def _use_selected_candidate(self) -> None:
+            candidate = self.owner._selected_row(self.candidate_list, self.candidates)
+            if not candidate:
+                self.owner._error("请先生成并选择一个候选方案")
+                return
+            self.owner._apply_search_candidate_to_project(candidate, self._generation_profile())
+            self.accept()
+
+
     class NovelDesktopUI:
         def __init__(self, services: ApplicationServices, title: str) -> None:
             self.services = services
@@ -506,6 +672,7 @@ if PYSIDE6_AVAILABLE:
             self.current_version_ids: list[int] = []
             self.project_tag_selection: dict[str, list[str]] = {}
             self.dialogue_quote_style_value = "cn_quotes"
+            self.pending_generation_profile_json = ""
             self.projects: list[dict[str, Any]] = []
             self.outline_version_rows: list[dict[str, Any]] = []
             self.world_rows: list[dict[str, Any]] = []
@@ -614,7 +781,8 @@ if PYSIDE6_AVAILABLE:
             self.project_list.setItemDelegate(ProjectShelfDelegate(self.project_list))
             self.project_list.currentRowChanged.connect(lambda _row: self.select_project())
             left.addWidget(self.project_list, 1)
-            left.addWidget(self._button("新建项目", self.start_new_project))
+            left.addWidget(self._button("新建空白项目", self.start_new_project))
+            left.addWidget(self._button("像找小说一样创建", self.open_search_project_creation_dialog))
             left.addWidget(self._button("刷新项目", self.refresh_projects))
             layout.addWidget(left_frame, 1.618)
 
@@ -1065,6 +1233,124 @@ if PYSIDE6_AVAILABLE:
             self.dialogue_quote_style_value = str(quote_combo.currentData() or "cn_quotes")
             self._update_project_tag_summary()
 
+        def open_search_project_creation_dialog(self) -> None:
+            dialog = SearchProjectCreationDialog(self)
+            dialog.exec()
+
+        def _generate_search_creation_candidates(self, profile: dict[str, Any]) -> list[dict[str, Any]]:
+            for method_name in (
+                "generate_novel_candidates",
+                "generate_search_project_candidates",
+                "novel_candidate_generator",
+            ):
+                if not hasattr(self.pipeline, method_name):
+                    continue
+                method = getattr(self.pipeline, method_name, None)
+                if not callable(method):
+                    continue
+                result = method(profile)
+                candidates = result.get("candidates", result) if isinstance(result, dict) else result
+                if isinstance(candidates, list) and candidates:
+                    return [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
+            return self._fallback_search_creation_candidates(profile)
+
+        def _fallback_search_creation_candidates(self, profile: dict[str, Any]) -> list[dict[str, Any]]:
+            query = str(profile.get("search_query") or "").strip() or "未指定搜索式"
+            selected_tags = profile.get("selected_tags", {})
+            tag_ids = [
+                tag_id
+                for values in selected_tags.values()
+                if isinstance(values, list)
+                for tag_id in values
+            ] if isinstance(selected_tags, dict) else []
+            tags = tag_ids[:6] or ["original", "draft"]
+            exclusions = profile.get("exclude_tags", [])
+            exclude_text = "、".join(str(item) for item in exclusions) if isinstance(exclusions, list) else str(exclusions or "")
+            reader = str(profile.get("target_readers") or "轻小说向")
+            pov = str(profile.get("pov") or "第三人称有限视角")
+            return [
+                {
+                    "temporary_title": f"{query[:18]}：候选方案 {index}",
+                    "one_line_hook": f"围绕“{query}”生成的原创小说方向，保留人工可编辑空间。",
+                    "tags": tags,
+                    "target_readers": reader,
+                    "pov": pov,
+                    "story_start": f"主角在与“{query}”相关的异常事件中被迫做出第一个选择。",
+                    "main_character_direction": "谨慎但有行动力，初期目标清晰，能力与关系随事件逐步变化。",
+                    "world_direction": "世界规则围绕搜索式需求展开，关键设定通过事件逐步揭示。",
+                    "relationship_direction": "核心关系从互相试探开始，随着共同风险逐步建立信任。",
+                    "style_direction": f"节奏服务于{reader}阅读体验；排除项：{exclude_text or '无'}。",
+                    "stateful_requirements": ["重要身份、能力、关系变化需要进入资料库或后续回写。"],
+                    "risk_notes": ["当前为 UI 兼容占位候选；接入 pipeline 后应由模型生成更完整候选。"],
+                }
+                for index in range(1, 4)
+            ]
+
+        def _candidate_project_draft(self, candidate: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+            for method_name in ("candidate_to_project_draft", "candidate_to_project_fields", "novel_candidate_to_project_fields"):
+                if not hasattr(self.pipeline, method_name):
+                    continue
+                method = getattr(self.pipeline, method_name, None)
+                if callable(method):
+                    result = method(candidate, profile)
+                    if isinstance(result, dict):
+                        return dict(result)
+            tags = candidate.get("tags", [])
+            tags_text = "、".join(str(tag) for tag in tags) if isinstance(tags, list) else str(tags or "")
+            return {
+                "title": str(candidate.get("temporary_title") or candidate.get("title") or ""),
+                "genre": tags_text,
+                "style": str(candidate.get("style_direction") or ""),
+                "target_readers": str(candidate.get("target_readers") or profile.get("target_readers") or ""),
+                "pov": str(candidate.get("pov") or profile.get("pov") or ""),
+                "world_summary": str(candidate.get("world_direction") or ""),
+                "writing_style_guide": "\n".join(
+                    part
+                    for part in [
+                        str(candidate.get("style_direction") or ""),
+                        *[f"状态记忆：{item}" for item in candidate.get("stateful_requirements", [])],
+                        *[f"风险提示：{item}" for item in candidate.get("risk_notes", [])],
+                    ]
+                    if part
+                ),
+                "global_concept": "\n".join(
+                    part
+                    for part in [
+                        str(candidate.get("one_line_hook") or ""),
+                        f"故事开局：{candidate.get('story_start', '')}",
+                        f"主角方向：{candidate.get('main_character_direction', '')}",
+                        f"关系方向：{candidate.get('relationship_direction', '')}",
+                    ]
+                    if part
+                ),
+            }
+
+        def _apply_search_candidate_to_project(self, candidate: dict[str, Any], profile: dict[str, Any]) -> None:
+            draft = self._candidate_project_draft(candidate, profile)
+            profile_payload = {
+                "creation_mode": "candidate",
+                **profile,
+                "selected_candidate": candidate,
+            }
+            draft["generation_profile_json"] = profile_payload
+            self.pending_generation_profile_json = json.dumps(profile_payload, ensure_ascii=False, indent=2)
+            self.current_project_id = None
+            for key, widget in self.project_fields.items():
+                if key in draft:
+                    self._set_text(widget, draft.get(key, ""))
+            for key, widget in self.project_texts.items():
+                if key in draft:
+                    self._set_text(widget, draft.get(key, ""))
+            selected_tags = profile.get("selected_tags", {})
+            if isinstance(selected_tags, dict):
+                self.project_tag_selection = {
+                    field: normalize_tag_ids(selected_tags.get(field))
+                    for field in FIELD_TO_CATEGORY
+                }
+                self._update_project_tag_summary()
+            self.project_list.clearSelection()
+            self._ok("已根据候选填充项目字段和标签；尚未保存，可继续修改后手动保存。")
+
         def _selected_row(self, list_widget: QListWidget, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             row = list_widget.currentRow()
             if row < 0 or row >= len(rows):
@@ -1124,6 +1410,7 @@ if PYSIDE6_AVAILABLE:
             for key, widget in self.project_texts.items():
                 self._set_text(widget, project.get(key, ""))
             self._set_project_tag_data(project)
+            self.pending_generation_profile_json = str(project.get("generation_profile_json", "") or "")
             self._load_outline_planning_defaults(project)
             self._clear_project_views()
             self.refresh_all_project_views()
@@ -1139,6 +1426,7 @@ if PYSIDE6_AVAILABLE:
             for widget in self.project_texts.values():
                 self._set_text(widget, "")
             self._clear_project_tag_data()
+            self.pending_generation_profile_json = ""
             self._clear_outline_planning_fields()
             self.project_list.clearSelection()
             self._clear_project_views()
@@ -1295,6 +1583,8 @@ if PYSIDE6_AVAILABLE:
             data = {key: self._text(widget) for key, widget in self.project_fields.items()}
             data.update({key: self._text(widget) for key, widget in self.project_texts.items()})
             data.update(self._project_tag_data())
+            if getattr(self, "pending_generation_profile_json", ""):
+                data["generation_profile_json"] = self.pending_generation_profile_json
             if not data["title"]:
                 self._error("项目名称不能为空")
                 return

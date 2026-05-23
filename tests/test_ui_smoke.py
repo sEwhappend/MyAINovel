@@ -2003,7 +2003,11 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("相关标签：点一下选中", source)
         self.assertIn("QScrollArea", source)
         self.assertIn("QGridLayout", source)
+        self.assertIn("self.candidate_list.setVerticalScrollBarPolicy", source)
+        self.assertIn("self.detail_text.setVerticalScrollBarPolicy", source)
         self.assertIn("ScrollBarAlwaysOff", source)
+        self.assertIn("ScrollBarAlwaysOn", source)
+        self.assertIn("setViewportMargins(0, 0, 12, 0)", source)
         self.assertIn("\"故事标签\"", source)
         self.assertIn("\"写作标签\"", source)
         self.assertIn("def _group_visible_tags", source)
@@ -2013,6 +2017,16 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("def _refresh_tag_buttons", source)
         self.assertIn("def _cycle_tag_state", source)
         self.assertIn("def _excluded_tag_ids", source)
+        self.assertIn("正在自动创建候选方案", source)
+        self.assertIn("def _after_generate_candidates", source)
+        self.assertIn("def _set_generation_busy", source)
+        self.assertIn("def _generate_search_creation_candidates_streaming", source)
+        self.assertIn("generate_novel_candidates_streaming(profile, on_delta)", source)
+        self.assertIn('self.owner._temporary_stream_targets["search_candidate"] = self.detail_text', source)
+        self.assertIn('"search_candidate"', source)
+        self.assertIn("self.progress_bar = QProgressBar()", source)
+        self.assertIn('self.progress_bar.setObjectName("LlmProgress")', source)
+        self.assertIn("self.progress_bar.setRange(0, 0)", source)
         self.assertIn("background: #ffe9ec", source)
         search_dialog_block = source[
             source.index("class SearchProjectCreationDialog(QDialog)"):
@@ -2029,6 +2043,8 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("def _apply_search_candidate_to_project", source)
         self.assertIn("self.current_project_id = None", source)
         self.assertIn("尚未保存", source)
+        self.assertIn("self._temporary_stream_targets", source)
+        self.assertIn("widgets.update(getattr(self, \"_temporary_stream_targets\", {}))", source)
 
     def test_pyside_character_summary_does_not_expand_world_layout_width(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
@@ -2051,7 +2067,11 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("AI 修改方向", source)
         self.assertIn("direction = self._ask_world_enrich_direction()", source)
         self.assertIn("self.pipeline.enrich_world_item(project_id, item_id, direction)", source)
+        self.assertIn("正在连接模型，准备流式生成资料 JSON", source)
+        self.assertIn("def _run_streaming_world_item", source)
+        self.assertIn("generate_world_item_streaming(project_id, kind, on_delta)", source)
         self.assertIn("self.pipeline.generate_world_item(project_id, kind)", source)
+        self.assertIn('"world_item": self.world_summary', source)
         self.assertNotIn("self.world_ai_direction = QTextEdit()", source)
 
     def test_pyside_outline_page_owns_planning_mode_and_word_fields(self) -> None:

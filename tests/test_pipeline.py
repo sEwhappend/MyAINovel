@@ -158,6 +158,28 @@ class StreamingFakeLLM(FakeLLM):
         return "流式正文"
 
 
+class NovelCandidateStreamingFakeLLM(FakeLLM):
+    config = {"chat_model": "candidate-model", "review_model": "review-model"}
+
+    def stream_text(self, model, messages, on_delta):
+        self.stream_model = model
+        self.stream_messages = messages
+        chunks = [
+            '{"candidates":[{"temporary_title":"流式学院候选",',
+            '"one_line_hook":"失格转生生在钟塔学院重新争夺姓名。",',
+            '"tags":["魔法学院"],"target_readers":"青少年","pov":"第三人称有限视角",',
+            '"story_start":"主角入学第一天被判定为失格。",',
+            '"main_character_direction":"谨慎但不服输。",',
+            '"world_form":"魔法学院与钟塔评定制度。","world_history":"旧王国留下失格制度。",',
+            '"world_direction":"学院排名决定社会身份。","novel_blurb":"被判失格的转生生必须在钟塔学院夺回姓名。",',
+            '"relationship_direction":"从被孤立到建立小队。","style_direction":"日式轻小说",',
+            '"stateful_requirements":["排名变化需要记录"],"risk_notes":["避免学院设定重复"]}]}',
+        ]
+        for chunk in chunks:
+            on_delta(chunk)
+        return "".join(chunks)
+
+
 class GlobalOutlineStreamingFakeLLM(FakeLLM):
     config = {"chat_model": "fast-model", "review_model": "strong-model"}
 
@@ -180,6 +202,22 @@ class OutlineSplitStreamingFakeLLM(FakeLLM):
             '{"expanded_outline":"丰满后的全书框架","chapters":[',
             '{"number":1,"title":"流式旧宅","location":"旧宅","characters":["林砚"],',
             '"sections":[{"number":1,"title":"流式走廊","location":"走廊","characters":["林砚"]}]}]}',
+        ]
+        for chunk in chunks:
+            on_delta(chunk)
+        return "".join(chunks)
+
+
+class WorldItemStreamingFakeLLM(FakeLLM):
+    config = {"chat_model": "world-model", "review_model": "review-model"}
+
+    def stream_text(self, model, messages, on_delta):
+        self.stream_model = model
+        self.stream_messages = messages
+        chunks = [
+            '{"kind":"location","name":"流式钟楼广场",',
+            '"summary":"流式生成的重要公共空间。","details":{"atmosphere":"钟声压迫"},',
+            '"tags":"AI创建,流式","status":"candidate"}',
         ]
         for chunk in chunks:
             on_delta(chunk)
@@ -270,6 +308,26 @@ class PipelineTests(unittest.TestCase):
         payload = json.loads(user_content.split("\n", 1)[1])
         self.assertEqual(payload["generation_profile"]["search_query"], profile["search_query"])
         self.assertEqual(payload["candidate_count"], "3-6")
+
+    def test_generate_novel_candidates_streaming_reports_chunks_and_parses_json(self) -> None:
+        llm = NovelCandidateStreamingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        chunks: list[str] = []
+        profile = {
+            "search_query": "魔法学院 失格 转生",
+            "selected_tags": {"setting": ["magic_academy"]},
+            "target_readers": "青少年",
+        }
+
+        result = pipeline.generate_novel_candidates_streaming(profile, chunks.append)
+
+        self.assertEqual(result["candidates"][0]["temporary_title"], "流式学院候选")
+        self.assertEqual(llm.stream_model, "candidate-model")
+        self.assertIn("流式学院候选", "".join(chunks))
+        user_content = llm.stream_messages[-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["generation_profile"]["search_query"], "魔法学院 失格 转生")
+        self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
 
     def test_candidate_to_project_draft_maps_editable_project_fields(self) -> None:
         profile = {
@@ -1071,6 +1129,64 @@ class PipelineTests(unittest.TestCase):
         payload = json.loads(user_content.split("\n", 1)[1])
         self.assertEqual(payload["current_kind"], "location")
         self.assertEqual(payload["current_outline"]["content"], "旧宅故事从雨夜开始。")
+        self.assertNotIn("metadata", payload["current_outline"])
+        self.assertNotIn("project_writing_constraints", payload)
+
+    def test_generate_world_item_uses_compact_context_to_reduce_timeouts(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        self.store.update_project(
+            self.project_id,
+            {
+                "style": "明快。" * 400,
+                "target_readers": "青少年。" * 300,
+                "world_summary": "世界观。" * 900,
+                "writing_style_guide": "风格说明。" * 900,
+                "global_concept": "小说简介。" * 900,
+                "selected_style_tags": ["jp_light_novel", "battle_shounen"],
+            },
+        )
+        self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "全书故事大纲",
+                "content": "大纲。" * 1200,
+                "metadata": {"expanded_outline": "不应发送完整 metadata"},
+            }
+        )
+
+        pipeline.generate_world_item(self.project_id, "location")
+
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        project = payload["project"]
+        self.assertLessEqual(len(project["style"]), 650)
+        self.assertLessEqual(len(project["target_readers"]), 450)
+        self.assertLessEqual(len(project["world_summary"]), 1260)
+        self.assertLessEqual(len(project["writing_style_guide"]), 860)
+        self.assertLessEqual(len(project["global_concept"]), 1260)
+        self.assertLessEqual(len(payload["current_outline"]["content"]), 2560)
+        self.assertNotIn("selected_style_tags", project)
+        self.assertNotIn("metadata", payload["current_outline"])
+
+    def test_generate_world_item_streaming_saves_after_complete_json(self) -> None:
+        llm = WorldItemStreamingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        chunks: list[str] = []
+
+        result = pipeline.generate_world_item_streaming(self.project_id, "location", chunks.append)
+
+        self.assertEqual(result["world_item"]["name"], "流式钟楼广场")
+        self.assertEqual(llm.stream_model, "world-model")
+        self.assertEqual("".join(chunks), '{"kind":"location","name":"流式钟楼广场","summary":"流式生成的重要公共空间。","details":{"atmosphere":"钟声压迫"},"tags":"AI创建,流式","status":"candidate"}')
+        details = json.loads(result["world_item"]["details_json"])
+        self.assertEqual(details["atmosphere"], "钟声压迫")
+        user_content = llm.stream_messages[-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["current_kind"], "location")
+        self.assertNotIn("project_writing_constraints", payload)
+        self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
 
     def test_write_chapter_memory_upserts_candidates_from_finalized_sections(self) -> None:
         chapter_id = self.store.save_chapter(self.project_id, {"number": 1, "title": "旧宅入口"})

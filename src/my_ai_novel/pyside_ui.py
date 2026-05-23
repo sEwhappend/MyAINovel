@@ -517,10 +517,12 @@ if PYSIDE6_AVAILABLE:
             self.tag_scroll = QScrollArea()
             self.tag_scroll.setWidgetResizable(True)
             self.tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            self.tag_scroll.setViewportMargins(0, 0, 12, 0)
             self.tag_scroll.setMinimumHeight(260)
             self.tag_host = QWidget()
             self.tag_grid = QGridLayout(self.tag_host)
-            self.tag_grid.setContentsMargins(4, 4, 4, 4)
+            self.tag_grid.setContentsMargins(4, 4, 18, 4)
             self.tag_grid.setHorizontalSpacing(6)
             self.tag_grid.setVerticalSpacing(6)
             self.tag_scroll.setWidget(self.tag_host)
@@ -530,11 +532,12 @@ if PYSIDE6_AVAILABLE:
 
             result_column = QVBoxLayout()
             self.candidate_list = QListWidget()
+            self.candidate_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.candidate_list.currentRowChanged.connect(lambda _row: self._show_candidate_detail())
-            generate_button = QPushButton("生成候选")
-            generate_button.setProperty("primary", True)
-            generate_button.clicked.connect(self._generate_candidates)
-            result_column.addWidget(generate_button)
+            self.generate_button = QPushButton("生成候选")
+            self.generate_button.setProperty("primary", True)
+            self.generate_button.clicked.connect(self._generate_candidates)
+            result_column.addWidget(self.generate_button)
             result_column.addWidget(QLabel("候选方案"))
             result_column.addWidget(self.candidate_list, 1)
             body.addLayout(result_column, 1)
@@ -542,15 +545,17 @@ if PYSIDE6_AVAILABLE:
             detail_column = QVBoxLayout()
             self.detail_text = QTextEdit()
             self.detail_text.setReadOnly(True)
+            self.detail_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             use_button = QPushButton("用这个创建项目")
             use_button.setProperty("primary", True)
             use_button.clicked.connect(self._use_selected_candidate)
-            similar_button = QPushButton("生成相似方案")
-            similar_button.clicked.connect(self._generate_candidates)
+            self.use_button = use_button
+            self.similar_button = QPushButton("生成相似方案")
+            self.similar_button.clicked.connect(self._generate_candidates)
             detail_column.addWidget(QLabel("详情与操作"))
             detail_column.addWidget(self.detail_text, 1)
             detail_column.addWidget(use_button)
-            detail_column.addWidget(similar_button)
+            detail_column.addWidget(self.similar_button)
             body.addLayout(detail_column, 1)
             layout.addLayout(body, 1)
 
@@ -568,6 +573,14 @@ if PYSIDE6_AVAILABLE:
 
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(self.reject)
+            self.status_label = QLabel("")
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setObjectName("LlmProgress")
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_bar.setVisible(False)
+            layout.addWidget(self.status_label)
+            layout.addWidget(self.progress_bar)
             layout.addWidget(buttons)
             owner._resize_dialog_to_window(self)
 
@@ -683,8 +696,31 @@ if PYSIDE6_AVAILABLE:
             return excluded
 
         def _generate_candidates(self) -> None:
+            if getattr(self.owner, "_async_busy", False):
+                self.owner._error("已有后台任务运行中，请稍候")
+                return
             profile = self._generation_profile()
-            self.candidates = self.owner._generate_search_creation_candidates(profile)
+            self._set_generation_busy(True, "正在自动创建候选方案...")
+            self.detail_text.setPlainText("")
+            self.owner._temporary_stream_targets["search_candidate"] = self.detail_text
+
+            def action() -> dict[str, Any]:
+                try:
+                    return {"ok": True, "candidates": self.owner._generate_search_creation_candidates_streaming(profile)}
+                except Exception as exc:
+                    return {"ok": False, "error": str(exc)}
+
+            self.owner._run_async(action, "正在自动创建候选方案...", "", self._after_generate_candidates)
+
+        def _after_generate_candidates(self, result: dict[str, Any]) -> bool:
+            self._set_generation_busy(False, "")
+            self.owner._temporary_stream_targets.pop("search_candidate", None)
+            if not result.get("ok"):
+                self.owner.refresh_logs()
+                self.owner._error(str(result.get("error") or "生成候选失败"))
+                return False
+            candidates = result.get("candidates", [])
+            self.candidates = [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
             self.candidate_list.clear()
             for candidate in self.candidates:
                 title = str(candidate.get("temporary_title") or candidate.get("title") or "未命名候选")
@@ -692,6 +728,18 @@ if PYSIDE6_AVAILABLE:
                 self.candidate_list.addItem(f"{title}\n{hook}")
             if self.candidates:
                 self.candidate_list.setCurrentRow(0)
+                self.status_label.setText(f"已生成 {len(self.candidates)} 个候选方案")
+            else:
+                self.status_label.setText("未生成候选方案，请调整标签或搜索词后重试")
+            self.owner.refresh_logs()
+            return False
+
+        def _set_generation_busy(self, busy: bool, message: str) -> None:
+            self.generate_button.setEnabled(not busy)
+            self.similar_button.setEnabled(not busy)
+            self.use_button.setEnabled(not busy)
+            self.progress_bar.setVisible(busy)
+            self.status_label.setText(message)
 
         def _show_candidate_detail(self) -> None:
             candidate = self.owner._selected_row(self.candidate_list, self.candidates)
@@ -756,6 +804,7 @@ if PYSIDE6_AVAILABLE:
             self.character_card_rows: list[dict[str, Any]] = []
             self.location_rows: list[dict[str, Any]] = []
             self._async_busy = False
+            self._temporary_stream_targets: dict[str, QTextEdit] = {}
             self.automation_cancel_event: threading.Event | None = None
             self.app = QApplication.instance() or QApplication([])
             self.app.setStyle("Fusion")
@@ -1341,6 +1390,20 @@ if PYSIDE6_AVAILABLE:
                 if isinstance(candidates, list) and candidates:
                     return [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
             return self._fallback_search_creation_candidates(profile)
+
+        def _generate_search_creation_candidates_streaming(self, profile: dict[str, Any]) -> list[dict[str, Any]]:
+            def on_delta(delta: str) -> None:
+                if delta:
+                    self.bridge.stream.emit("search_candidate", delta)
+
+            if hasattr(self.pipeline, "generate_novel_candidates_streaming"):
+                result = self.pipeline.generate_novel_candidates_streaming(profile, on_delta)
+                candidates = result.get("candidates", result) if isinstance(result, dict) else result
+                if isinstance(candidates, list) and candidates:
+                    return [dict(candidate) for candidate in candidates if isinstance(candidate, dict)]
+            candidates = self._generate_search_creation_candidates(profile)
+            on_delta(json.dumps({"candidates": candidates}, ensure_ascii=False, indent=2))
+            return candidates
 
         def _fallback_search_creation_candidates(self, profile: dict[str, Any]) -> list[dict[str, Any]]:
             query = str(profile.get("search_query") or "").strip() or "未指定搜索式"
@@ -2103,8 +2166,10 @@ if PYSIDE6_AVAILABLE:
             if not project_id:
                 return
             kind = world_kind_value(self.world_kind.currentText())
+            self._clear_world_form(reset_kind=False)
+            self.world_summary.setPlainText("正在连接模型，准备流式生成资料 JSON...\n")
             self._run_async(
-                lambda: self.pipeline.generate_world_item(project_id, kind),
+                lambda: self._run_streaming_world_item(project_id, kind),
                 f"正在自动创建{world_kind_label(kind)}，请稍候...",
                 "资料已自动创建",
                 self._after_create_world_item_with_ai,
@@ -2494,12 +2559,28 @@ if PYSIDE6_AVAILABLE:
                 on_delta(content)
             return result
 
+        def _run_streaming_world_item(self, project_id: int, kind: str) -> dict[str, Any]:
+            self.bridge.stream.emit("world_item", "")
+
+            def on_delta(delta: str) -> None:
+                if delta:
+                    self.bridge.stream.emit("world_item", delta)
+
+            if hasattr(self.pipeline, "generate_world_item_streaming"):
+                return self.pipeline.generate_world_item_streaming(project_id, kind, on_delta)
+            result = self.pipeline.generate_world_item(project_id, kind)
+            preview = json.dumps(result.get("world_item", result), ensure_ascii=False, indent=2)
+            on_delta(preview)
+            return result
+
         def _append_streaming_target(self, target: str, delta: str) -> None:
             widgets = {
                 "outline": self.outline_text,
                 "outline_split": self.outline_split_preview,
                 "draft": self.current_generation_text,
+                "world_item": self.world_summary,
             }
+            widgets.update(getattr(self, "_temporary_stream_targets", {}))
             widget = widgets.get(target)
             if widget is None:
                 return

@@ -77,18 +77,74 @@ class NovelPipeline:
 
     def generate_novel_candidates(self, generation_profile: dict[str, Any]) -> dict[str, Any]:
         """Generate editable novel project candidates from search-style input."""
-        profile = dict(generation_profile or {})
-        result = self._call(
-            "novel_candidate_generator",
-            {
-                "generation_profile": profile,
-                "candidate_count": profile.get("candidate_count") or profile.get("count") or "3-6",
-            },
-        )
+        payload = self._novel_candidate_payload(generation_profile)
+        result = self._call("novel_candidate_generator", payload)
         candidates = result.get("candidates")
         if not isinstance(candidates, list):
             candidates = []
         return {**result, "candidates": candidates}
+
+    def generate_novel_candidates_streaming(
+        self,
+        generation_profile: dict[str, Any],
+        on_delta=None,
+    ) -> dict[str, Any]:
+        """Generate editable novel project candidates with streamed JSON preview."""
+        payload = self._novel_candidate_payload(generation_profile)
+        messages = build_messages("novel_candidate_generator", payload)
+        _append_to_first_system_before_user(
+            messages,
+            "输出必须是 JSON object，字段要求："
+            + json.dumps(SCHEMA_HINTS["novel_candidate_generator"], ensure_ascii=False)
+            + "。流式输出时仍只输出这个 JSON object，不要输出说明、寒暄或 Markdown 代码块。",
+        )
+        model = self.llm.config.get("chat_model") or self.llm.config.get("review_model") or ""
+        chunks: list[str] = []
+
+        def collect(delta: str) -> None:
+            chunks.append(delta)
+            if on_delta:
+                on_delta(delta)
+
+        try:
+            text = self.llm.stream_text(model, messages, collect)
+            raw = text or "".join(chunks)
+            result = parse_json_response(raw)
+            self.store.save_llm_call_log(
+                {
+                    "project_id": None,
+                    "agent_name": "novel_candidate_generator",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": raw[:500],
+                    "success": True,
+                }
+            )
+        except Exception as exc:
+            self.store.save_llm_call_log(
+                {
+                    "project_id": None,
+                    "agent_name": "novel_candidate_generator",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": "".join(chunks)[:500],
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+            raise
+        candidates = result.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = []
+        return {**result, "candidates": candidates}
+
+    @staticmethod
+    def _novel_candidate_payload(generation_profile: dict[str, Any] | None) -> dict[str, Any]:
+        profile = dict(generation_profile or {})
+        return {
+            "generation_profile": profile,
+            "candidate_count": profile.get("candidate_count") or profile.get("count") or "3-6",
+        }
 
     def candidate_to_project_draft(
         self,
@@ -353,11 +409,95 @@ class NovelPipeline:
     def generate_world_item(self, project_id: int, kind: str) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
         kind = validate_world_kind(kind)
-        payload = {"project": project, "current_kind": kind}
+        payload = self._world_item_creation_payload(project_id, project, kind)
+        result = self._call_world_item_creator(project_id, payload)
+        return self._save_generated_world_item(project_id, kind, result)
+
+    def generate_world_item_streaming(self, project_id: int, kind: str, on_delta=None) -> dict[str, Any]:
+        project = self._require(self.store.get_project(project_id), "project")
+        kind = validate_world_kind(kind)
+        payload = self._world_item_creation_payload(project_id, project, kind)
+        messages = build_messages("world_item_creator", payload)
+        _append_to_first_system_before_user(
+            messages,
+            "输出必须是 JSON object，字段要求："
+            + json.dumps(SCHEMA_HINTS["world_item_creator"], ensure_ascii=False)
+            + "。流式输出时仍只输出这个 JSON object，不要输出说明、寒暄或 Markdown 代码块。",
+        )
+        model = self.llm.config.get("chat_model") or self.llm.config.get("review_model") or ""
+        chunks: list[str] = []
+
+        def collect(delta: str) -> None:
+            chunks.append(delta)
+            if on_delta:
+                on_delta(delta)
+
+        try:
+            text = self.llm.stream_text(model, messages, collect)
+            raw = text or "".join(chunks)
+            result = parse_json_response(raw)
+            self.store.save_llm_call_log(
+                {
+                    "project_id": project_id,
+                    "agent_name": "world_item_creator",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": raw[:500],
+                    "success": True,
+                }
+            )
+        except Exception as exc:
+            self.store.save_llm_call_log(
+                {
+                    "project_id": project_id,
+                    "agent_name": "world_item_creator",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": "".join(chunks)[:500],
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+            raise
+        return self._save_generated_world_item(project_id, kind, result)
+
+    def _world_item_creation_payload(self, project_id: int, project: dict[str, Any], kind: str) -> dict[str, Any]:
+        payload = {"project": self._world_item_creation_project_context(project), "current_kind": kind}
         outline = self._latest_outline_snapshot(project_id)
         if outline:
-            payload["current_outline"] = outline
-        result = self._call("world_item_creator", payload)
+            payload["current_outline"] = self._compact_outline_snapshot(outline)
+        return payload
+
+    def _call_world_item_creator(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+        messages = build_messages("world_item_creator", payload)
+        try:
+            result = self.llm.chat_json("world_item_creator", messages, SCHEMA_HINTS.get("world_item_creator"))
+            self.store.save_llm_call_log(
+                {
+                    "project_id": project_id,
+                    "agent_name": "world_item_creator",
+                    "model": self.llm.config.get("chat_model", ""),
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": json.dumps(result, ensure_ascii=False)[:500],
+                    "success": True,
+                }
+            )
+            return result
+        except Exception as exc:
+            self.store.save_llm_call_log(
+                {
+                    "project_id": project_id,
+                    "agent_name": "world_item_creator",
+                    "model": self.llm.config.get("chat_model", ""),
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": "",
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+            raise
+
+    def _save_generated_world_item(self, project_id: int, kind: str, result: dict[str, Any]) -> dict[str, Any]:
         created = {
             "kind": kind,
             "name": str(result.get("name", "") or "").strip() or f"新{kind}",
@@ -369,6 +509,27 @@ class NovelPipeline:
         item_id = self.store.save_world_item(project_id, created)
         saved = self.store.get_world_item(project_id, item_id) or {**created, "id": item_id}
         return {"world_item_id": item_id, "world_item": saved, **result}
+
+    def _world_item_creation_project_context(self, project: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": project.get("id"),
+            "title": project.get("title", ""),
+            "genre": project.get("genre", ""),
+            "style": self._truncate_text(project.get("style", ""), 600),
+            "target_readers": self._truncate_text(project.get("target_readers", ""), 400),
+            "length_target": project.get("length_target", ""),
+            "pov": project.get("pov", ""),
+            "world_summary": self._truncate_text(project.get("world_summary", ""), 1200),
+            "writing_style_guide": self._truncate_text(project.get("writing_style_guide", ""), 800),
+            "global_concept": self._truncate_text(project.get("global_concept", ""), 1200),
+        }
+
+    def _compact_outline_snapshot(self, outline: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": outline.get("id"),
+            "label": outline.get("label", ""),
+            "content": self._truncate_text(outline.get("content", ""), 2500),
+        }
 
     def generate_default_main_character(self, project_id: int) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")
@@ -1333,6 +1494,13 @@ class NovelPipeline:
             return result
         text = str(value).strip()
         return [text] if text else []
+
+    @staticmethod
+    def _truncate_text(value: Any, limit: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "\n[已截断：资料库自动创建只使用项目摘要上下文]"
 
     @staticmethod
     def _joined(value: Any, separator: str = "、") -> str:

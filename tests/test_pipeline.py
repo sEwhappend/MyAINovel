@@ -114,9 +114,12 @@ class FakeLLM:
                         "pov": "第三人称有限视角",
                         "story_start": "主角在风车镇醒来，发现自己的身份记录被公共石碑写错。",
                         "main_character_direction": "谨慎、弱战斗力、擅长观察，初期目标只是回家。",
+                        "world_form": "西式幻想世界，身份、职业和等级会被公共石碑记录。",
+                        "world_history": "十六年前的钟楼灾难让身份记录制度被教会接管。",
                         "world_direction": "西式幻想世界，身份、职业和等级会被公共石碑记录。",
+                        "novel_blurb": "不擅长战斗的异乡少女在风车镇醒来，发现公共石碑把她登记成不存在的人。为了找回回家的线索，她必须用记录能力拆解被教会掩埋的旧谎言。",
                         "relationship_direction": "主角与本地少女从互相戒备转为利益同盟。",
-                        "style_direction": "轻小说式对白，悬疑推进，不强行设置反派势力。",
+                        "style_direction": "<日式轻小说>",
                         "stateful_requirements": [
                             "等级变化必须写入角色卡",
                             "身份记录变化必须持续记忆",
@@ -290,16 +293,21 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(draft["target_readers"], "青少年")
         self.assertEqual(draft["length_target"], "30000")
         self.assertEqual(draft["pov"], "第三人称有限视角")
+        self.assertEqual(draft["style"], "日式轻小说")
+        self.assertNotIn("<", draft["style"])
+        self.assertNotIn(">", draft["style"])
         self.assertEqual(draft["selected_genre_tags"], ["fantasy"])
         self.assertEqual(draft["selected_setting_tags"], ["isekai_transfer", "level_system"])
         self.assertEqual(draft["selected_structure_tags"], ["main_plot_driven"])
         self.assertEqual(draft["selected_style_tags"], ["jp_light_novel", "corner_quotes"])
         self.assertEqual(draft["dialogue_quote_style"], "corner_quotes")
         self.assertIn("西式幻想世界", draft["world_summary"])
+        self.assertIn("十六年前的钟楼灾难", draft["world_summary"])
         self.assertIn("谨慎", draft["character_brief"])
         self.assertIn("状态记忆要求", draft["writing_style_guide"])
         self.assertIn("排除项", draft["writing_style_guide"])
         self.assertIn("公共石碑", draft["global_concept"])
+        self.assertNotIn("西式幻想世界", draft["global_concept"])
 
     def test_outline_split_draft_review_rewrite_flow(self) -> None:
         outline = self.pipeline.expand_global_concept(self.project_id)

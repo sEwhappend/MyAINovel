@@ -10,6 +10,7 @@ from .prompts import SCHEMA_HINTS, build_messages, build_project_writing_constra
 from .retrieval import retrieve_context
 from .review import build_rewrite_request, validate_review_issues
 from .storage import NovelStore
+from .style_tags import list_style_tag_catalog
 from .world_modules import character_basic_fields_from_details, merge_module_patches
 
 
@@ -103,29 +104,22 @@ class NovelPipeline:
         risk_notes = self._text_list(candidate.get("risk_notes"))
         forbidden_tags = normalized_tags.get("forbidden") or profile.get("exclude_tags") or []
         forbidden = self._text_list(forbidden_tags)
-
-        style_parts = [
-            candidate.get("style_direction"),
-            self._joined(tags),
-        ]
+        style_text = self._clean_candidate_text(candidate.get("style_direction"))
+        if not style_text:
+            style_text = self._joined(self._tag_labels(normalized_tags.get("style")))
         writing_style_parts = [
-            candidate.get("style_direction"),
+            style_text,
             self._prefixed_lines("状态记忆要求", stateful_requirements),
             self._prefixed_lines("风险提示", risk_notes),
             self._prefixed_lines("排除项", forbidden),
         ]
-        concept_parts = [
-            candidate.get("one_line_hook"),
-            candidate.get("story_start"),
-            candidate.get("world_direction"),
-            candidate.get("main_character_direction"),
-            candidate.get("relationship_direction"),
-        ]
+        world_summary = self._candidate_world_summary(candidate)
+        global_concept = self._candidate_novel_blurb(candidate)
 
         draft = {
             "title": str(candidate.get("temporary_title") or "").strip(),
             "genre": self._joined(normalized_tags.get("genre")) or self._joined(tags),
-            "style": self._joined(part for part in style_parts if part),
+            "style": style_text,
             "target_readers": str(candidate.get("target_readers") or profile.get("reader_target") or "").strip(),
             "length_target": str(profile.get("planning_target_words") or profile.get("length_target") or "").strip(),
             "pov": str(candidate.get("pov") or profile.get("pov") or "").strip(),
@@ -136,10 +130,10 @@ class NovelPipeline:
             "selected_style_tags": self._text_list(normalized_tags.get("style")),
             "selected_forbidden_tags": self._text_list(normalized_tags.get("forbidden")),
             "dialogue_quote_style": self._dialogue_quote_style(profile, normalized_tags),
-            "world_summary": str(candidate.get("world_direction") or "").strip(),
+            "world_summary": world_summary,
             "character_brief": str(candidate.get("main_character_direction") or "").strip(),
             "writing_style_guide": "\n".join(part for part in writing_style_parts if part),
-            "global_concept": "\n".join(str(part).strip() for part in concept_parts if str(part or "").strip()),
+            "global_concept": global_concept,
         }
         return draft
 
@@ -1350,6 +1344,54 @@ class NovelPipeline:
                 items.append(item)
                 seen.add(key)
         return separator.join(items)
+
+    @staticmethod
+    def _clean_candidate_text(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        if text.startswith("<") and text.endswith(">"):
+            text = text[1:-1].strip()
+        if text.casefold() in {"xxx", "xx", "placeholder", "todo", "待填", "待定", "占位"}:
+            return ""
+        return text
+
+    @staticmethod
+    def _tag_labels(tag_ids: Any) -> list[str]:
+        ids = NovelPipeline._text_list(tag_ids)
+        if not ids:
+            return []
+        by_id = {
+            str(tag.get("id", "")): str(tag.get("label", ""))
+            for tags in list_style_tag_catalog().values()
+            for tag in tags
+        }
+        return [by_id.get(tag_id, tag_id) for tag_id in ids]
+
+    @staticmethod
+    def _candidate_world_summary(candidate: dict[str, Any]) -> str:
+        explicit = NovelPipeline._clean_candidate_text(candidate.get("world_summary"))
+        if explicit:
+            return explicit
+        parts = [
+            NovelPipeline._clean_candidate_text(candidate.get("world_form")),
+            NovelPipeline._clean_candidate_text(candidate.get("world_history")),
+            NovelPipeline._clean_candidate_text(candidate.get("world_direction")),
+        ]
+        return "\n".join(part for part in parts if part)
+
+    @staticmethod
+    def _candidate_novel_blurb(candidate: dict[str, Any]) -> str:
+        explicit = NovelPipeline._clean_candidate_text(candidate.get("novel_blurb"))
+        if explicit:
+            return explicit
+        parts = [
+            NovelPipeline._clean_candidate_text(candidate.get("one_line_hook")),
+            NovelPipeline._clean_candidate_text(candidate.get("story_start")),
+            NovelPipeline._clean_candidate_text(candidate.get("main_character_direction")),
+            NovelPipeline._clean_candidate_text(candidate.get("relationship_direction")),
+        ]
+        return "\n".join(part for part in parts if part)
 
     @staticmethod
     def _prefixed_lines(title: str, items: list[str]) -> str:

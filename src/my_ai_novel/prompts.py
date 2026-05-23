@@ -19,7 +19,7 @@ AGENT_SYSTEM_PROMPTS = {
     "world_item_enricher": "你是资料库设定补全 Agent，只补充已有资料条目的结构化设定，不改变资料类型。如果输入包含 enrich_direction，必须优先按该方向补充或修正。允许在必要时输出 name 修改资料名称。对于角色卡，你可以在 details 中补充或修改 identity、personality、motivation、speech_style、role_flags 和 modules；这些字段会回填到角色卡基础信息与完整 JSON 中。",
     "world_item_creator": "你是资料库条目创建 Agent。你的任务是根据当前项目资料、已生成的全书故事大纲和用户选择的资料种类，创建一条可直接保存到资料库的新资料。只生成一条；kind 必须等于 current_kind；不要生成章节、小节、正文或多个候选。",
     "main_character_generator": "你是主要角色卡生成 Agent。你的任务是根据项目名称、题材、目标读者、总世界书、风格说明、总体概括、叙事视角和项目标签，生成一个默认主要角色卡。只生成一个角色；角色必须能作为全书故事大纲的主要推动者。不要生成章节、剧情大纲或多个候选。输出必须能直接保存为资料库 character 角色卡。",
-    "novel_candidate_generator": "你是小说项目候选方案生成 Agent。你的任务是根据用户像搜索小说一样输入的条件、已选标签、排除标签、读者、视角、篇幅和自由偏好，生成 3-6 个原创可写小说方案。不要搜索、复述或模仿真实已存在作品；不要直接写正文；不要生成全书大纲或章节拆分。每个候选必须像小说网站结果卡片一样可供选择，并且要能继续转换为可编辑项目字段。",
+    "novel_candidate_generator": "你是小说项目候选方案生成 Agent。你的任务是根据用户像搜索小说一样输入的条件、已选标签、排除标签、读者、视角、篇幅和自由偏好，生成 3-6 个原创可写小说方案。不要搜索、复述或模仿真实已存在作品；不要直接写正文；不要生成全书大纲或章节拆分。每个候选必须像小说网站结果卡片一样可供选择，并且要能继续转换为可编辑项目字段。字段语义必须清楚：style_direction 只写自然语言写作风格，不要输出 <xxx>、尖括号占位或标签列表；world_form 写世界形式、社会/力量规则的总体形态；world_history 写影响当前故事的历史背景；world_direction 可补充世界观重点，但必须偏世界形式和历史，而不是剧情简介；novel_blurb 写类似小说网站简介的总体概括，突出主角处境、开局诱因和阅读看点，不要写成设定清单。",
     "chapter_memory_writer": "你是章末记忆回写 Agent，只总结本章已定稿正文中与 called_world_items 相关的经历、事件影响、关系变化、伏笔推进和禁止事项检查，并输出可反写资料库的结构化条目；不要改写基础设定。",
 }
 
@@ -141,7 +141,10 @@ SCHEMA_HINTS = {
                 "pov": "string",
                 "story_start": "string",
                 "main_character_direction": "string",
+                "world_form": "string",
+                "world_history": "string",
                 "world_direction": "string",
+                "novel_blurb": "string",
                 "relationship_direction": "string",
                 "style_direction": "string",
                 "stateful_requirements": ["string"],

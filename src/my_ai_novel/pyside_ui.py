@@ -55,6 +55,7 @@ try:
         QDialogButtonBox,
         QFormLayout,
         QFrame,
+        QGridLayout,
         QHBoxLayout,
         QLabel,
         QLineEdit,
@@ -64,6 +65,7 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSizePolicy,
         QSplitter,
         QStackedWidget,
@@ -497,38 +499,33 @@ if PYSIDE6_AVAILABLE:
             super().__init__(owner.window)
             self.owner = owner
             self.candidates: list[dict[str, Any]] = []
-            self.tag_checks: dict[str, dict[str, QCheckBox]] = {}
+            self.tag_states: dict[str, dict[str, int]] = {}
+            self.tag_buttons: dict[tuple[str, str], QPushButton] = {}
+            self.tag_catalog: dict[str, list[dict[str, Any]]] = {}
             self.setWindowTitle("像找小说一样创建项目")
             layout = QVBoxLayout(self)
             self.query_input = QLineEdit()
             self.query_input.setPlaceholderText("输入想看/想写的小说方向，例如：异世界转移 TS 等级成长 轻小说 不要后宫")
+            self.query_input.textChanged.connect(lambda _text: self._refresh_tag_buttons())
             layout.addWidget(QLabel("搜索式需求"))
             layout.addWidget(self.query_input)
-
-            controls = QHBoxLayout()
-            self.reader_combo = QComboBox()
-            self.reader_combo.addItems(["青少年向", "少女向", "青年向", "轻小说向", "成人向"])
-            self.pov_combo = QComboBox()
-            self.pov_combo.addItems(["第三人称有限视角", "第一人称", "多视角", "主角视角"])
-            controls.addWidget(QLabel("读者"))
-            controls.addWidget(self.reader_combo)
-            controls.addWidget(QLabel("视角"))
-            controls.addWidget(self.pov_combo)
-            controls.addStretch(1)
-            layout.addLayout(controls)
+            layout.addWidget(QLabel("相关标签：点一下选中，再点一下变为红色排除，再点一下恢复默认"))
 
             body = QHBoxLayout()
             filter_column = QVBoxLayout()
             filter_column.addWidget(QLabel("标签/排除项"))
-            self._build_tag_checks(filter_column)
-            self.exclude_input = QLineEdit()
-            self.exclude_input.setPlaceholderText("排除项，用逗号分隔，例如：不要系统,不要后宫")
-            filter_column.addWidget(QLabel("排除项"))
-            filter_column.addWidget(self.exclude_input)
-            open_tags = QPushButton("打开现有标签选择")
-            open_tags.clicked.connect(self._open_existing_tag_selector)
-            filter_column.addWidget(open_tags)
-            filter_column.addStretch(1)
+            self.tag_scroll = QScrollArea()
+            self.tag_scroll.setWidgetResizable(True)
+            self.tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.tag_scroll.setMinimumHeight(260)
+            self.tag_host = QWidget()
+            self.tag_grid = QGridLayout(self.tag_host)
+            self.tag_grid.setContentsMargins(4, 4, 4, 4)
+            self.tag_grid.setHorizontalSpacing(6)
+            self.tag_grid.setVerticalSpacing(6)
+            self.tag_scroll.setWidget(self.tag_host)
+            filter_column.addWidget(self.tag_scroll, 1)
+            self._build_tag_buttons()
             body.addLayout(filter_column, 1)
 
             result_column = QVBoxLayout()
@@ -557,56 +554,133 @@ if PYSIDE6_AVAILABLE:
             body.addLayout(detail_column, 1)
             layout.addLayout(body, 1)
 
+            controls = QHBoxLayout()
+            self.reader_combo = QComboBox()
+            self.reader_combo.addItems(["青少年向", "少女向", "青年向", "轻小说向", "成人向"])
+            self.pov_combo = QComboBox()
+            self.pov_combo.addItems(["第三人称有限视角", "第一人称", "多视角", "主角视角"])
+            controls.addWidget(QLabel("读者"))
+            controls.addWidget(self.reader_combo)
+            controls.addWidget(QLabel("视角"))
+            controls.addWidget(self.pov_combo)
+            controls.addStretch(1)
+            layout.addLayout(controls)
+
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(self.reject)
             layout.addWidget(buttons)
             owner._resize_dialog_to_window(self)
 
-        def _build_tag_checks(self, layout: QVBoxLayout) -> None:
+        def _build_tag_buttons(self) -> None:
             catalog = list_style_tag_catalog()
-            labels = {
-                "selected_genre_tags": "题材标签",
-                "selected_setting_tags": "设定标签",
-                "selected_structure_tags": "结构标签",
-                "selected_style_tags": "风格标签",
-            }
             for field, category in FIELD_TO_CATEGORY.items():
-                layout.addWidget(QLabel(labels.get(field, field)))
-                row = QVBoxLayout()
-                self.tag_checks[field] = {}
+                self.tag_states[field] = {}
+                self.tag_catalog[field] = []
                 selected = set(getattr(self.owner, "project_tag_selection", {}).get(field, []))
                 for tag in catalog.get(category, []):
                     tag_id = str(tag.get("id", ""))
-                    checkbox = QCheckBox(str(tag.get("label", tag_id)))
-                    checkbox.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
-                    checkbox.setChecked(tag_id in selected)
-                    self.tag_checks[field][tag_id] = checkbox
-                    row.addWidget(checkbox)
-                layout.addLayout(row)
+                    self.tag_states[field][tag_id] = 1 if tag_id in selected else 0
+                    self.tag_catalog[field].append(dict(tag))
+            self._refresh_tag_buttons()
 
-        def _open_existing_tag_selector(self) -> None:
-            self.owner.edit_project_tags_dialog()
-            current = getattr(self.owner, "project_tag_selection", {})
-            for field, field_checks in self.tag_checks.items():
-                selected = set(current.get(field, []))
-                for tag_id, checkbox in field_checks.items():
-                    checkbox.setChecked(tag_id in selected)
+        def _refresh_tag_buttons(self) -> None:
+            while self.tag_grid.count():
+                item = self.tag_grid.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            self.tag_buttons = {}
+            query = self.query_input.text().strip().lower() if hasattr(self, "query_input") else ""
+            terms = [term for term in query.replace("，", " ").replace(",", " ").split() if term]
+            row = 0
+            max_columns = 3
+            grouped_tags = self._group_visible_tags(terms)
+            for title, entries in (("故事标签", grouped_tags["story"]), ("写作标签", grouped_tags["writing"])):
+                if not entries:
+                    continue
+                header = QLabel(title)
+                header.setObjectName("PanelTitle")
+                self.tag_grid.addWidget(header, row, 0, 1, max_columns)
+                row += 1
+                row = self._add_tag_button_group(entries, row, max_columns)
+            if not self.tag_buttons:
+                self.tag_grid.addWidget(QLabel("没有匹配标签，可以换一个关键词"), 0, 0)
+
+        def _group_visible_tags(self, terms: list[str]) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+            grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {"story": [], "writing": []}
+            for field, tags in self.tag_catalog.items():
+                for tag in tags:
+                    if not self._tag_matches_query(tag, terms):
+                        continue
+                    group = "story" if bool(tag.get("requires_memory")) else "writing"
+                    grouped[group].append((field, tag))
+            return grouped
+
+        def _add_tag_button_group(
+            self,
+            entries: list[tuple[str, dict[str, Any]]],
+            row: int,
+            max_columns: int,
+        ) -> int:
+            column = 0
+            for field, tag in entries:
+                tag_id = str(tag.get("id", ""))
+                button = QPushButton(str(tag.get("label", tag_id)))
+                button.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
+                button.clicked.connect(lambda _checked=False, f=field, t=tag_id: self._cycle_tag_state(f, t))
+                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                self.tag_buttons[(field, tag_id)] = button
+                self._style_tag_button(button, self.tag_states.get(field, {}).get(tag_id, 0))
+                self.tag_grid.addWidget(button, row, column)
+                column += 1
+                if column >= max_columns:
+                    column = 0
+                    row += 1
+            if column:
+                row += 1
+            return row
+
+        def _tag_matches_query(self, tag: dict[str, Any], terms: list[str]) -> bool:
+            if not terms:
+                return True
+            haystack = " ".join(
+                str(tag.get(key, ""))
+                for key in ("id", "label", "style_rule", "usage_rule")
+            ).lower()
+            return any(term in haystack for term in terms)
+
+        def _cycle_tag_state(self, field: str, tag_id: str) -> None:
+            state = (self.tag_states.get(field, {}).get(tag_id, 0) + 1) % 3
+            self.tag_states.setdefault(field, {})[tag_id] = state
+            button = self.tag_buttons.get((field, tag_id))
+            if button is not None:
+                self._style_tag_button(button, state)
+
+        def _style_tag_button(self, button: QPushButton, state: int) -> None:
+            if state == 1:
+                button.setStyleSheet("background: #eaf3ff; border: 1px solid #6fa8ff; color: #1f4f99;")
+            elif state == 2:
+                button.setStyleSheet("background: #ffe9ec; border: 1px solid #e56b73; color: #b63a45;")
+            else:
+                button.setStyleSheet("")
 
         def _generation_profile(self) -> dict[str, Any]:
             return {
                 "search_query": self.query_input.text().strip(),
                 "selected_tags": {
-                    field: [tag_id for tag_id, checkbox in checks.items() if checkbox.isChecked()]
-                    for field, checks in self.tag_checks.items()
+                    field: [tag_id for tag_id, state in states.items() if state == 1]
+                    for field, states in self.tag_states.items()
                 },
-                "exclude_tags": [
-                    item.strip()
-                    for item in self.exclude_input.text().replace("，", ",").split(",")
-                    if item.strip()
-                ],
+                "exclude_tags": self._excluded_tag_ids(),
                 "target_readers": self.reader_combo.currentText().strip(),
                 "pov": self.pov_combo.currentText().strip(),
             }
+
+        def _excluded_tag_ids(self) -> list[str]:
+            excluded: list[str] = []
+            for states in self.tag_states.values():
+                excluded.extend(tag_id for tag_id, state in states.items() if state == 2)
+            return excluded
 
         def _generate_candidates(self) -> None:
             profile = self._generation_profile()
@@ -781,8 +855,7 @@ if PYSIDE6_AVAILABLE:
             self.project_list.setItemDelegate(ProjectShelfDelegate(self.project_list))
             self.project_list.currentRowChanged.connect(lambda _row: self.select_project())
             left.addWidget(self.project_list, 1)
-            left.addWidget(self._button("新建空白项目", self.start_new_project))
-            left.addWidget(self._button("像找小说一样创建", self.open_search_project_creation_dialog))
+            left.addWidget(self._button("新建空白项目", self.open_new_project_choice_dialog))
             left.addWidget(self._button("刷新项目", self.refresh_projects))
             layout.addWidget(left_frame, 1.618)
 
@@ -1236,6 +1309,21 @@ if PYSIDE6_AVAILABLE:
         def open_search_project_creation_dialog(self) -> None:
             dialog = SearchProjectCreationDialog(self)
             dialog.exec()
+
+        def open_new_project_choice_dialog(self) -> None:
+            dialog = QMessageBox(self.window)
+            dialog.setWindowTitle("新建项目")
+            dialog.setIcon(QMessageBox.Icon.Question)
+            dialog.setText("请选择创建方式")
+            manual_button = dialog.addButton("手动填写", QMessageBox.ButtonRole.AcceptRole)
+            candidate_button = dialog.addButton("通过标签/候选方案生成", QMessageBox.ButtonRole.ActionRole)
+            dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            dialog.setDefaultButton(manual_button)
+            dialog.exec()
+            if dialog.clickedButton() is manual_button:
+                self.start_new_project()
+            elif dialog.clickedButton() is candidate_button:
+                self.open_search_project_creation_dialog()
 
         def _generate_search_creation_candidates(self, profile: dict[str, Any]) -> list[dict[str, Any]]:
             for method_name in (

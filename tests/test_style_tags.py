@@ -46,6 +46,26 @@ class StyleTagTests(unittest.TestCase):
                 self.assertIn("requires_memory", tag)
                 self.assertIn("memory_kinds", tag)
 
+    def test_catalog_has_no_duplicate_ids_or_labels(self) -> None:
+        catalog = list_style_tag_catalog()
+        seen_ids: set[str] = set()
+        seen_labels: set[str] = set()
+        duplicate_ids: list[str] = []
+        duplicate_labels: list[str] = []
+        for tags in catalog.values():
+            for tag in tags:
+                tag_id = tag["id"]
+                label = tag["label"]
+                if tag_id in seen_ids:
+                    duplicate_ids.append(tag_id)
+                if label in seen_labels:
+                    duplicate_labels.append(label)
+                seen_ids.add(tag_id)
+                seen_labels.add(label)
+
+        self.assertEqual(duplicate_ids, [])
+        self.assertEqual(duplicate_labels, [])
+
     def test_stateful_tags_are_identified_by_requires_memory(self) -> None:
         modules = build_prompt_modules(
             {

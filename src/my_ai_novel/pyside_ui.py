@@ -394,10 +394,10 @@ if PYSIDE6_AVAILABLE:
         # GRID_WIDTH/GRID_HEIGHT 控制每一本书占用的格子大小。
         # TWO_COLUMN_MIN_WIDTH 控制书架从单列切换到双列的最小可用宽度。
         # EDGE_PADDING 和 SCROLLBAR_RESERVE 用来避免内容贴边或被滚动条挤压。
-        GRID_WIDTH = 176
+        GRID_WIDTH = 190
         GRID_HEIGHT = 300
         TWO_COLUMN_MIN_WIDTH = 160
-        EDGE_PADDING = 2
+        EDGE_PADDING = 0
         SCROLLBAR_RESERVE = -130
 
         def resizeEvent(self, event) -> None:  # type: ignore[override]
@@ -424,7 +424,7 @@ if PYSIDE6_AVAILABLE:
     class ProjectShelfDelegate(QStyledItemDelegate):
         def sizeHint(self, option, index) -> QSize:  # type: ignore[override]
             # 实际卡片绘制区域；如果修改这里，通常也要同步调整 GRID_WIDTH/GRID_HEIGHT。
-            return QSize(176, 252)
+            return QSize(176, 290)
 
         def paint(self, painter: QPainter, option, index) -> None:  # type: ignore[override]
             painter.save()
@@ -638,7 +638,7 @@ if PYSIDE6_AVAILABLE:
             self._edge_resize_margin = 8
             # 手动调整窗口最小尺寸的位置：这里控制用户拖动边缘时能缩到多小。
             # 如果放大初始窗口后仍希望允许缩小，可以只改下面的初始 resize，不改这里。
-            self.target.setMinimumSize(QSize(840, 520))
+            self.target.setMinimumSize(QSize(1260, 775))
             self.target.setMouseTracking(True)
             self.target.installEventFilter(self)
             self.setObjectName("HeaderBar")

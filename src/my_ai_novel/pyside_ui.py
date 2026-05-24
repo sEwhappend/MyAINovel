@@ -46,7 +46,7 @@ from .world_modules import (
 
 try:
     from PySide6.QtCore import QEvent, QRect, QObject, QSize, Qt, Signal
-    from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
+    from PySide6.QtGui import QColor, QCursor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -101,7 +101,7 @@ def build_pyside_stylesheet() -> str:
     QWidget#AppRoot {
         background: #f7faff;
         border: 1px solid #dce6f2;
-        border-radius: 14px;
+        border-radius: 10px;
     }
     QLabel#Header {
         font-size: 18px;
@@ -134,10 +134,10 @@ def build_pyside_stylesheet() -> str:
         border: 1px solid transparent;
         border-radius: 6px;
         padding: 2px;
-        min-width: 22px;
+        min-width: 34px;
         min-height: 20px;
-        max-width: 22px;
-        max-height: 20px;
+        max-width: 34px;
+        max-height: 24px;
     }
     QToolButton#WindowControl:hover {
         background: #eaf3ff;
@@ -173,7 +173,7 @@ def build_pyside_stylesheet() -> str:
     QFrame#ProjectShelfPane, QFrame#ProjectDetailPane, QFrame#ChapterOutlinePane, QFrame#ChapterEditorPane {
         background: #ffffff;
         border: 1px solid #dce6f2;
-        border-radius: 12px;
+        border-radius: 10px;
     }
     QLabel#PanelTitle {
         color: #2e5eaa;
@@ -229,7 +229,7 @@ def build_pyside_stylesheet() -> str:
     QListWidget#Navigation {
         background: #ffffff;
         border: 1px solid #dce6f2;
-        border-radius: 12px;
+        border-radius: 10px;
         padding: 8px;
     }
     QListWidget#Navigation::item {
@@ -382,6 +382,26 @@ class _ValueAdapter:
 
 
 if PYSIDE6_AVAILABLE:
+
+    def _apply_windows_round_corners(widget: QWidget) -> None:
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(widget.winId())
+            # Windows 11 原生 DWM 圆角：2 表示系统默认圆角，不使用透明窗口或顶层 mask。
+            corner_preference = ctypes.c_int(2)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                33,
+                ctypes.byref(corner_preference),
+                ctypes.sizeof(corner_preference),
+            )
+        except Exception:
+            pass
+
 
     class _AsyncBridge(QObject):
         success = Signal(str, object, object)
@@ -623,6 +643,42 @@ if PYSIDE6_AVAILABLE:
             return y + line_height + margins.bottom() - rect.y()
 
 
+    class WindowControlButton(QToolButton):
+        def __init__(self, control_kind: str, parent: QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.control_kind = control_kind
+            self.setObjectName("WindowControl")
+            self.setText("")
+            self.setAutoRaise(True)
+            self.setFixedSize(34, 24)
+
+        def set_control_kind(self, control_kind: str) -> None:
+            self.control_kind = control_kind
+            self.update()
+
+        def paintEvent(self, event) -> None:  # type: ignore[override]
+            super().paintEvent(event)
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            pen = QPen(QColor("#5f6368"), 1)
+            pen.setCapStyle(Qt.PenCapStyle.SquareCap)
+            painter.setPen(pen)
+            rect = self.rect()
+            center_x = rect.center().x()
+            center_y = rect.center().y()
+            if self.control_kind == "minimize":
+                painter.drawLine(center_x - 5, center_y + 4, center_x + 5, center_y + 4)
+            elif self.control_kind == "maximize":
+                painter.drawRect(center_x - 5, center_y - 5, 10, 10)
+            elif self.control_kind == "restore":
+                painter.drawRect(center_x - 3, center_y - 6, 9, 9)
+                painter.drawRect(center_x - 6, center_y - 3, 9, 9)
+            elif self.control_kind == "close":
+                painter.drawLine(center_x - 5, center_y - 5, center_x + 5, center_y + 5)
+                painter.drawLine(center_x + 5, center_y - 5, center_x - 5, center_y + 5)
+            painter.end()
+
+
     class WindowTitleBar(QFrame):
         """无系统标题栏窗口使用的自定义标题栏。"""
 
@@ -649,23 +705,18 @@ if PYSIDE6_AVAILABLE:
             self.title_label.setObjectName("HeaderTitle")
             self.title_label.installEventFilter(self)
             layout.addWidget(self.title_label, 1)
-            layout.addWidget(self._control_button(QStyle.StandardPixmap.SP_TitleBarMinButton, self.target.showMinimized))
+            layout.addWidget(self._control_button("minimize", self.target.showMinimized))
             self.maximize_button = self._control_button(
-                QStyle.StandardPixmap.SP_TitleBarMaxButton,
+                "maximize",
                 self._toggle_maximized,
             )
             layout.addWidget(self.maximize_button)
-            close_button = self._control_button(QStyle.StandardPixmap.SP_TitleBarCloseButton, self.target.close)
+            close_button = self._control_button("close", self.target.close)
             close_button.setProperty("closeControl", True)
             layout.addWidget(close_button)
 
-        def _control_button(self, icon: QStyle.StandardPixmap, slot: Callable[[], None]) -> QToolButton:
-            button = QToolButton(self)
-            button.setObjectName("WindowControl")
-            button.setIcon(self.style().standardIcon(icon))
-            button.setIconSize(QSize(12, 12))
-            button.setText("")
-            button.setAutoRaise(True)
+        def _control_button(self, control_kind: str, slot: Callable[[], None]) -> WindowControlButton:
+            button = WindowControlButton(control_kind, self)
             button.clicked.connect(slot)
             return button
 
@@ -683,12 +734,7 @@ if PYSIDE6_AVAILABLE:
             self._refresh_maximize_icon()
 
         def _refresh_maximize_icon(self) -> None:
-            icon = (
-                QStyle.StandardPixmap.SP_TitleBarNormalButton
-                if self._manually_maximized
-                else QStyle.StandardPixmap.SP_TitleBarMaxButton
-            )
-            self.maximize_button.setIcon(self.style().standardIcon(icon))
+            self.maximize_button.set_control_kind("restore" if self._manually_maximized else "maximize")
 
         def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
             if watched is self.target:
@@ -860,6 +906,7 @@ if PYSIDE6_AVAILABLE:
             self.tag_catalog: dict[str, list[dict[str, Any]]] = {}
             self.setWindowTitle("标签化生成")
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            _apply_windows_round_corners(self)
             layout = QVBoxLayout(self)
             layout.addWidget(WindowTitleBar("标签化生成", self))
             self.query_input = QLineEdit()
@@ -1173,14 +1220,48 @@ if PYSIDE6_AVAILABLE:
             self.window = QMainWindow()
             self.window.setWindowTitle(title)
             self.window.setWindowFlags(self.window.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            _apply_windows_round_corners(self.window)
             # 手动调整主窗口初始大小的位置：第一个数字是宽度，第二个数字是高度。
             # 例如可改为 QSize 接近的 1040x680 或 1120x720；不要改回按屏幕比例自动计算。
             self.window.resize(1260, 775)
             self._build()
+            self._place_window_on_startup_screen()
             self.refresh_projects()
+
+        def _place_window_on_startup_screen(self) -> None:
+            # 启动位置修正：优先显示在鼠标当前所在屏幕，而不是总是交给系统放到主屏。
+            # 这能减少主屏/副屏缩放比例不一致时，新窗口先落到错误屏幕后被 DPI 换算放大的问题。
+            screen = QApplication.screenAt(QCursor.pos()) or self.window.screen() or QApplication.primaryScreen()
+            if screen is None:
+                return
+            available = screen.availableGeometry()
+            margin = 24
+            current_size = self.window.size()
+            max_width = max(self.window.minimumWidth(), available.width() - margin * 2)
+            max_height = max(self.window.minimumHeight(), available.height() - margin * 2)
+            target_width = min(current_size.width(), max_width)
+            target_height = min(current_size.height(), max_height)
+            if target_width != current_size.width() or target_height != current_size.height():
+                self.window.resize(target_width, target_height)
+            geometry = QRect(0, 0, self.window.width(), self.window.height())
+            geometry.moveCenter(available.center())
+            min_x = available.left() + margin
+            max_x = available.right() - geometry.width() + 1 - margin
+            min_y = available.top() + margin
+            max_y = available.bottom() - geometry.height() + 1 - margin
+            if max_x < min_x:
+                min_x = available.left()
+                max_x = available.right() - geometry.width() + 1
+            if max_y < min_y:
+                min_y = available.top()
+                max_y = available.bottom() - geometry.height() + 1
+            geometry.moveLeft(max(min_x, min(geometry.left(), max_x)))
+            geometry.moveTop(max(min_y, min(geometry.top(), max_y)))
+            self.window.move(geometry.topLeft())
 
         def run(self) -> None:
             self.window.show()
+            _apply_windows_round_corners(self.window)
             self.app.exec()
 
         def _build(self) -> None:
@@ -1231,6 +1312,15 @@ if PYSIDE6_AVAILABLE:
             button = QPushButton(text)
             button.clicked.connect(callback)
             return button
+
+        def _vertical_scroll_area(self, widget: QWidget) -> QScrollArea:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(widget)
+            return scroll
 
         def _resize_dialog_to_window(self, dialog: QDialog) -> None:
             size = self.window.size()
@@ -1482,13 +1572,15 @@ if PYSIDE6_AVAILABLE:
                 ("目标字数", "target_words"),
             ]:
                 widget = QLineEdit()
+                widget.setMinimumHeight(34)
                 self.structure_fields[key] = widget
                 form.addRow(label, widget)
             right.addLayout(form)
             for label, key in [("人物", "characters"), ("必须发生", "must_happen"), ("禁止内容", "forbidden")]:
                 right.addWidget(QLabel(label))
                 widget = QTextEdit()
-                widget.setMinimumHeight(60)
+                widget.setMinimumHeight(90)
+                widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                 self.structure_fields[key] = widget
                 right.addWidget(widget)
             action_row = QHBoxLayout()
@@ -1504,8 +1596,10 @@ if PYSIDE6_AVAILABLE:
             right.addWidget(QLabel("写作参考资料"))
             self.world_context_text = QTextEdit()
             self.world_context_text.setObjectName("WorldContext")
-            right.addWidget(self.world_context_text, 1)
-            layout.addWidget(right_frame, 2)
+            self.world_context_text.setMinimumHeight(180)
+            self.world_context_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            right.addWidget(self.world_context_text)
+            layout.addWidget(self._vertical_scroll_area(right_frame), 2)
 
         def _build_writing_page(self) -> None:
             page = self._add_page("写作")
@@ -1550,14 +1644,17 @@ if PYSIDE6_AVAILABLE:
 
         def _build_settings_page(self) -> None:
             page = self._add_page("设置")
-            layout = QVBoxLayout(page)
+            page_layout = QVBoxLayout(page)
+            content = QWidget()
+            layout = QVBoxLayout(content)
             form = QFormLayout()
             self.config_vars: dict[str, Any] = {}
             config = load_llm_config()
             for label, key in LLM_CONFIG_FIELDS:
                 if key == "model_candidates":
                     widget = QTextEdit()
-                    widget.setMinimumHeight(70)
+                    widget.setMinimumHeight(110)
+                    widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                     widget.setPlainText(str(config.get(key, "")))
                 elif key == "api_type":
                     widget = QComboBox()
@@ -1565,6 +1662,7 @@ if PYSIDE6_AVAILABLE:
                     widget.setCurrentText(api_type_display_value(config.get(key)))
                 else:
                     widget = QLineEdit(str(config.get(key, "")))
+                    widget.setMinimumHeight(34)
                     if key == "api_key":
                         widget.setEchoMode(QLineEdit.EchoMode.Password)
                 self.config_vars[key] = widget
@@ -1579,8 +1677,11 @@ if PYSIDE6_AVAILABLE:
                 actions.addWidget(self._button(text, callback))
             layout.addLayout(actions)
             self.model_scan_text = QTextEdit()
+            self.model_scan_text.setMinimumHeight(220)
+            self.model_scan_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             layout.addWidget(QLabel("可用模型"))
-            layout.addWidget(self.model_scan_text, 1)
+            layout.addWidget(self.model_scan_text)
+            page_layout.addWidget(self._vertical_scroll_area(content))
 
         def _build_logs_page(self) -> None:
             page = self._add_page("日志")

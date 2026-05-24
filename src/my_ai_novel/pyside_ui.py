@@ -45,7 +45,7 @@ from .world_modules import (
 )
 
 try:
-    from PySide6.QtCore import QRect, QObject, QSize, Qt, Signal
+    from PySide6.QtCore import QEvent, QRect, QObject, QSize, Qt, Signal
     from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
@@ -55,12 +55,13 @@ try:
         QDialogButtonBox,
         QFormLayout,
         QFrame,
-        QGridLayout,
         QHBoxLayout,
         QLabel,
         QLineEdit,
         QListWidget,
         QListWidgetItem,
+        QLayout,
+        QLayoutItem,
         QMainWindow,
         QMessageBox,
         QProgressBar,
@@ -72,6 +73,7 @@ try:
         QStyle,
         QStyledItemDelegate,
         QTextEdit,
+        QToolButton,
         QVBoxLayout,
         QWidget,
     )
@@ -87,11 +89,19 @@ def _install_message() -> str:
 
 def build_pyside_stylesheet() -> str:
     return """
-    QMainWindow, QWidget {
+    QMainWindow {
+        background: transparent;
+    }
+    QWidget {
         background: #f7faff;
         color: #243042;
         font-family: "Microsoft YaHei UI";
         font-size: 13px;
+    }
+    QWidget#AppRoot {
+        background: #f7faff;
+        border: 1px solid #dce6f2;
+        border-radius: 14px;
     }
     QLabel#Header {
         font-size: 18px;
@@ -102,6 +112,44 @@ def build_pyside_stylesheet() -> str:
         border: 1px solid #dce6f2;
         border-left: 6px solid #f6b7c9;
         border-radius: 10px;
+    }
+    QFrame#HeaderBar {
+        background: #ffffff;
+        border: 1px solid #dce6f2;
+        border-left: 6px solid #f6b7c9;
+        border-radius: 10px;
+        min-height: 42px;
+        max-height: 42px;
+    }
+    QLabel#HeaderTitle {
+        background: transparent;
+        border: 0;
+        color: #2e5eaa;
+        font-size: 18px;
+        font-weight: 700;
+        padding: 0;
+    }
+    QToolButton#WindowControl {
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 2px;
+        min-width: 22px;
+        min-height: 20px;
+        max-width: 22px;
+        max-height: 20px;
+    }
+    QToolButton#WindowControl:hover {
+        background: #eaf3ff;
+        border-color: #b8d4ff;
+    }
+    QToolButton#WindowControl:pressed {
+        background: #dbeaff;
+        border-color: #6fa8ff;
+    }
+    QToolButton#WindowControl[closeControl="true"]:hover {
+        background: #ffe9ec;
+        border-color: #e56b73;
     }
     QLabel#Status {
         padding: 8px 10px;
@@ -494,6 +542,314 @@ if PYSIDE6_AVAILABLE:
             painter.restore()
 
 
+    class TagFlowLayout(QLayout):
+        """让标签按内容宽度从左到右排列，行宽不够时自动换行。"""
+
+        def __init__(self, parent: QWidget | None = None, margin: int = 4, spacing: int = 6) -> None:
+            super().__init__(parent)
+            self._items: list[QLayoutItem] = []
+            self.setContentsMargins(margin, margin, margin + 24, margin)
+            self.setSpacing(spacing)
+
+        def addItem(self, item: QLayoutItem) -> None:  # type: ignore[override]
+            self._items.append(item)
+
+        def count(self) -> int:  # type: ignore[override]
+            return len(self._items)
+
+        def itemAt(self, index: int) -> QLayoutItem | None:  # type: ignore[override]
+            if 0 <= index < len(self._items):
+                return self._items[index]
+            return None
+
+        def takeAt(self, index: int) -> QLayoutItem | None:  # type: ignore[override]
+            if 0 <= index < len(self._items):
+                return self._items.pop(index)
+            return None
+
+        def expandingDirections(self) -> Qt.Orientation:  # type: ignore[override]
+            return Qt.Orientation(0)
+
+        def hasHeightForWidth(self) -> bool:  # type: ignore[override]
+            return True
+
+        def heightForWidth(self, width: int) -> int:  # type: ignore[override]
+            return self._do_layout(QRect(0, 0, width, 0), True)
+
+        def setGeometry(self, rect: QRect) -> None:  # type: ignore[override]
+            super().setGeometry(rect)
+            self._do_layout(rect, False)
+
+        def sizeHint(self) -> QSize:  # type: ignore[override]
+            return self.minimumSize()
+
+        def minimumSize(self) -> QSize:  # type: ignore[override]
+            size = QSize()
+            for item in self._items:
+                size = size.expandedTo(item.minimumSize())
+            margins = self.contentsMargins()
+            size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+            return size
+
+        def _do_layout(self, rect: QRect, test_only: bool) -> int:
+            margins = self.contentsMargins()
+            x = rect.x() + margins.left()
+            y = rect.y() + margins.top()
+            line_height = 0
+            right_limit = rect.right() - margins.right()
+
+            for item in self._items:
+                hint = item.sizeHint()
+                widget = item.widget()
+                if widget is not None and bool(widget.property("flow_full_row")):
+                    if x > rect.x() + margins.left():
+                        y += line_height + self.spacing()
+                    if not test_only:
+                        item.setGeometry(QRect(rect.x() + margins.left(), y, right_limit - rect.x(), hint.height()))
+                    x = rect.x() + margins.left()
+                    y += hint.height() + self.spacing()
+                    line_height = 0
+                    continue
+                next_x = x + hint.width() + self.spacing()
+                if x > rect.x() + margins.left() and next_x - self.spacing() > right_limit:
+                    x = rect.x() + margins.left()
+                    y += line_height + self.spacing()
+                    next_x = x + hint.width() + self.spacing()
+                    line_height = 0
+                if not test_only:
+                    item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+                x = next_x
+                line_height = max(line_height, hint.height())
+            return y + line_height + margins.bottom() - rect.y()
+
+
+    class WindowTitleBar(QFrame):
+        """无系统标题栏窗口使用的自定义标题栏。"""
+
+        def __init__(self, title: str, target: QWidget) -> None:
+            super().__init__(target)
+            self.target = target
+            self._drag_offset = None
+            self._normal_geometry: QRect | None = None
+            self._manually_maximized = False
+            self._resize_edges = ""
+            self._resize_start_pos = None
+            self._resize_start_geometry: QRect | None = None
+            self._edge_resize_margin = 8
+            # 手动调整窗口最小尺寸的位置：这里控制用户拖动边缘时能缩到多小。
+            # 如果放大初始窗口后仍希望允许缩小，可以只改下面的初始 resize，不改这里。
+            self.target.setMinimumSize(QSize(840, 520))
+            self.target.setMouseTracking(True)
+            self.target.installEventFilter(self)
+            self.setObjectName("HeaderBar")
+            layout = QHBoxLayout(self)
+            layout.setContentsMargins(12, 4, 8, 4)
+            layout.setSpacing(3)
+            self.title_label = QLabel(title)
+            self.title_label.setObjectName("HeaderTitle")
+            self.title_label.installEventFilter(self)
+            layout.addWidget(self.title_label, 1)
+            layout.addWidget(self._control_button(QStyle.StandardPixmap.SP_TitleBarMinButton, self.target.showMinimized))
+            self.maximize_button = self._control_button(
+                QStyle.StandardPixmap.SP_TitleBarMaxButton,
+                self._toggle_maximized,
+            )
+            layout.addWidget(self.maximize_button)
+            close_button = self._control_button(QStyle.StandardPixmap.SP_TitleBarCloseButton, self.target.close)
+            close_button.setProperty("closeControl", True)
+            layout.addWidget(close_button)
+
+        def _control_button(self, icon: QStyle.StandardPixmap, slot: Callable[[], None]) -> QToolButton:
+            button = QToolButton(self)
+            button.setObjectName("WindowControl")
+            button.setIcon(self.style().standardIcon(icon))
+            button.setIconSize(QSize(12, 12))
+            button.setText("")
+            button.setAutoRaise(True)
+            button.clicked.connect(slot)
+            return button
+
+        def _toggle_maximized(self) -> None:
+            if self._manually_maximized:
+                if self._normal_geometry is not None:
+                    self.target.setGeometry(self._normal_geometry)
+                self._manually_maximized = False
+            else:
+                self._normal_geometry = self.target.geometry()
+                screen = self.target.screen() or QApplication.primaryScreen()
+                if screen is not None:
+                    self.target.setGeometry(screen.availableGeometry())
+                self._manually_maximized = True
+            self._refresh_maximize_icon()
+
+        def _refresh_maximize_icon(self) -> None:
+            icon = (
+                QStyle.StandardPixmap.SP_TitleBarNormalButton
+                if self._manually_maximized
+                else QStyle.StandardPixmap.SP_TitleBarMaxButton
+            )
+            self.maximize_button.setIcon(self.style().standardIcon(icon))
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # type: ignore[override]
+            if watched is self.target:
+                if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                    if self._start_edge_resize(event):
+                        return True
+                if event.type() == QEvent.Type.MouseMove:
+                    if self._resize_edges:
+                        self._resize_window(event)
+                        return True
+                    self._update_edge_cursor(event)
+                if event.type() == QEvent.Type.MouseButtonRelease:
+                    self._finish_edge_resize()
+                    return False
+            if watched is self.title_label:
+                if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+                    self._toggle_maximized()
+                    return True
+                if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                    self._start_drag(event)
+                    return True
+                if event.type() == QEvent.Type.MouseMove and self._drag_offset is not None:
+                    self._drag_window(event)
+                    return True
+                if event.type() == QEvent.Type.MouseButtonRelease:
+                    self._drag_offset = None
+                    return True
+            return super().eventFilter(watched, event)
+
+        def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._toggle_maximized()
+                return
+            super().mouseDoubleClickEvent(event)
+
+        def mousePressEvent(self, event) -> None:  # type: ignore[override]
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._start_drag(event)
+                return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
+            if self._drag_offset is not None:
+                self._drag_window(event)
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+            self._drag_offset = None
+            super().mouseReleaseEvent(event)
+
+        def _start_drag(self, event) -> None:
+            if self._manually_maximized:
+                return
+            handle = self.target.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                self._drag_offset = None
+                return
+            self._drag_offset = event.globalPosition().toPoint() - self.target.frameGeometry().topLeft()
+
+        def _drag_window(self, event) -> None:
+            if self._manually_maximized:
+                return
+            cursor_pos = event.globalPosition().toPoint()
+            screen = QApplication.screenAt(cursor_pos) or self.target.screen() or QApplication.primaryScreen()
+            target_pos = cursor_pos - self._drag_offset
+            if screen is not None:
+                available = screen.availableGeometry()
+                width = self.target.width()
+                height = self.target.height()
+                min_visible = 96
+                min_x = available.left() - width + min_visible
+                max_x = available.right() - min_visible
+                min_y = available.top()
+                max_y = available.bottom() - min_visible
+                target_pos.setX(max(min_x, min(target_pos.x(), max_x)))
+                target_pos.setY(max(min_y, min(target_pos.y(), max_y)))
+            self.target.move(target_pos)
+
+        def _edge_hit_test(self, global_pos) -> str:
+            if self._manually_maximized:
+                return ""
+            rect = self.target.frameGeometry()
+            margin = self._edge_resize_margin
+            edges = ""
+            if abs(global_pos.x() - rect.left()) <= margin:
+                edges += "l"
+            elif abs(global_pos.x() - rect.right()) <= margin:
+                edges += "r"
+            if abs(global_pos.y() - rect.top()) <= margin:
+                edges += "t"
+            elif abs(global_pos.y() - rect.bottom()) <= margin:
+                edges += "b"
+            return edges
+
+        def _start_edge_resize(self, event) -> bool:
+            edges = self._edge_hit_test(event.globalPosition().toPoint())
+            if not edges:
+                return False
+            handle = self.target.windowHandle()
+            system_edges = self._system_resize_edges(edges)
+            if handle is not None and system_edges and handle.startSystemResize(system_edges):
+                self._resize_edges = ""
+                self._resize_start_pos = None
+                self._resize_start_geometry = None
+                return True
+            self._resize_edges = edges
+            self._resize_start_pos = event.globalPosition().toPoint()
+            self._resize_start_geometry = self.target.geometry()
+            return True
+
+        def _system_resize_edges(self, edges: str):
+            system_edges = Qt.Edges()
+            if "l" in edges:
+                system_edges |= Qt.Edge.LeftEdge
+            if "r" in edges:
+                system_edges |= Qt.Edge.RightEdge
+            if "t" in edges:
+                system_edges |= Qt.Edge.TopEdge
+            if "b" in edges:
+                system_edges |= Qt.Edge.BottomEdge
+            return system_edges
+
+        def _resize_window(self, event) -> None:
+            if self._resize_start_pos is None or self._resize_start_geometry is None:
+                return
+            delta = event.globalPosition().toPoint() - self._resize_start_pos
+            rect = QRect(self._resize_start_geometry)
+            minimum = self.target.minimumSize()
+            if "l" in self._resize_edges:
+                new_left = min(rect.left() + delta.x(), rect.right() - minimum.width())
+                rect.setLeft(new_left)
+            if "r" in self._resize_edges:
+                rect.setRight(max(rect.right() + delta.x(), rect.left() + minimum.width()))
+            if "t" in self._resize_edges:
+                new_top = min(rect.top() + delta.y(), rect.bottom() - minimum.height())
+                rect.setTop(new_top)
+            if "b" in self._resize_edges:
+                rect.setBottom(max(rect.bottom() + delta.y(), rect.top() + minimum.height()))
+            self.target.setGeometry(rect)
+
+        def _finish_edge_resize(self) -> None:
+            self._resize_edges = ""
+            self._resize_start_pos = None
+            self._resize_start_geometry = None
+            self.target.unsetCursor()
+
+        def _update_edge_cursor(self, event) -> None:
+            edges = self._edge_hit_test(event.globalPosition().toPoint())
+            if edges in ("lt", "rb", "tl", "br"):
+                self.target.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif edges in ("rt", "lb", "tr", "bl"):
+                self.target.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            elif edges in ("l", "r"):
+                self.target.setCursor(Qt.CursorShape.SizeHorCursor)
+            elif edges in ("t", "b"):
+                self.target.setCursor(Qt.CursorShape.SizeVerCursor)
+            else:
+                self.target.unsetCursor()
+
+
     class SearchProjectCreationDialog(QDialog):
         def __init__(self, owner: "NovelDesktopUI") -> None:
             super().__init__(owner.window)
@@ -502,18 +858,24 @@ if PYSIDE6_AVAILABLE:
             self.tag_states: dict[str, dict[str, int]] = {}
             self.tag_buttons: dict[tuple[str, str], QPushButton] = {}
             self.tag_catalog: dict[str, list[dict[str, Any]]] = {}
-            self.setWindowTitle("像找小说一样创建项目")
+            self.setWindowTitle("标签化生成")
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
             layout = QVBoxLayout(self)
+            layout.addWidget(WindowTitleBar("标签化生成", self))
             self.query_input = QLineEdit()
             self.query_input.setPlaceholderText("输入想看/想写的小说方向，例如：异世界转移 TS 等级成长 轻小说 不要后宫")
             self.query_input.textChanged.connect(lambda _text: self._refresh_tag_buttons())
-            layout.addWidget(QLabel("搜索式需求"))
+            query_title = QLabel("搜索式需求")
+            query_title.setObjectName("PanelTitle")
+            layout.addWidget(query_title)
             layout.addWidget(self.query_input)
             layout.addWidget(QLabel("相关标签：点一下选中，再点一下变为红色排除，再点一下恢复默认"))
 
             body = QHBoxLayout()
             filter_column = QVBoxLayout()
-            filter_column.addWidget(QLabel("标签/排除项"))
+            tag_title = QLabel("标签/排除项")
+            tag_title.setObjectName("PanelTitle")
+            filter_column.addWidget(tag_title)
             self.tag_scroll = QScrollArea()
             self.tag_scroll.setWidgetResizable(True)
             self.tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -521,10 +883,7 @@ if PYSIDE6_AVAILABLE:
             self.tag_scroll.setViewportMargins(0, 0, 12, 0)
             self.tag_scroll.setMinimumHeight(260)
             self.tag_host = QWidget()
-            self.tag_grid = QGridLayout(self.tag_host)
-            self.tag_grid.setContentsMargins(4, 4, 18, 4)
-            self.tag_grid.setHorizontalSpacing(6)
-            self.tag_grid.setVerticalSpacing(6)
+            self.tag_flow = TagFlowLayout(self.tag_host)
             self.tag_scroll.setWidget(self.tag_host)
             filter_column.addWidget(self.tag_scroll, 1)
             self._build_tag_buttons()
@@ -538,12 +897,15 @@ if PYSIDE6_AVAILABLE:
             self.generate_button.setProperty("primary", True)
             self.generate_button.clicked.connect(self._generate_candidates)
             result_column.addWidget(self.generate_button)
-            result_column.addWidget(QLabel("候选方案"))
+            candidate_title = QLabel("候选方案")
+            candidate_title.setObjectName("PanelTitle")
+            result_column.addWidget(candidate_title)
             result_column.addWidget(self.candidate_list, 1)
             body.addLayout(result_column, 1)
 
             detail_column = QVBoxLayout()
             self.detail_text = QTextEdit()
+            self.detail_text.setObjectName("StreamingOutput")
             self.detail_text.setReadOnly(True)
             self.detail_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             use_button = QPushButton("用这个创建项目")
@@ -552,7 +914,9 @@ if PYSIDE6_AVAILABLE:
             self.use_button = use_button
             self.similar_button = QPushButton("生成相似方案")
             self.similar_button.clicked.connect(self._generate_candidates)
-            detail_column.addWidget(QLabel("详情与操作"))
+            detail_title = QLabel("详情与操作")
+            detail_title.setObjectName("PanelTitle")
+            detail_column.addWidget(detail_title)
             detail_column.addWidget(self.detail_text, 1)
             detail_column.addWidget(use_button)
             detail_column.addWidget(self.similar_button)
@@ -574,14 +938,17 @@ if PYSIDE6_AVAILABLE:
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(self.reject)
             self.status_label = QLabel("")
+            self.status_label.setObjectName("Status")
             self.progress_bar = QProgressBar()
             self.progress_bar.setObjectName("LlmProgress")
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setTextVisible(False)
             self.progress_bar.setVisible(False)
-            layout.addWidget(self.status_label)
             layout.addWidget(self.progress_bar)
-            layout.addWidget(buttons)
+            footer = QHBoxLayout()
+            footer.addWidget(self.status_label, 1)
+            footer.addWidget(buttons)
+            layout.addLayout(footer)
             owner._resize_dialog_to_window(self)
 
         def _build_tag_buttons(self) -> None:
@@ -597,27 +964,25 @@ if PYSIDE6_AVAILABLE:
             self._refresh_tag_buttons()
 
         def _refresh_tag_buttons(self) -> None:
-            while self.tag_grid.count():
-                item = self.tag_grid.takeAt(0)
+            while self.tag_flow.count():
+                item = self.tag_flow.takeAt(0)
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
             self.tag_buttons = {}
             query = self.query_input.text().strip().lower() if hasattr(self, "query_input") else ""
             terms = [term for term in query.replace("，", " ").replace(",", " ").split() if term]
-            row = 0
-            max_columns = 3
             grouped_tags = self._group_visible_tags(terms)
             for title, entries in (("故事标签", grouped_tags["story"]), ("写作标签", grouped_tags["writing"])):
                 if not entries:
                     continue
                 header = QLabel(title)
                 header.setObjectName("PanelTitle")
-                self.tag_grid.addWidget(header, row, 0, 1, max_columns)
-                row += 1
-                row = self._add_tag_button_group(entries, row, max_columns)
+                header.setProperty("flow_full_row", True)
+                self.tag_flow.addWidget(header)
+                self._add_tag_button_group(entries)
             if not self.tag_buttons:
-                self.tag_grid.addWidget(QLabel("没有匹配标签，可以换一个关键词"), 0, 0)
+                self.tag_flow.addWidget(QLabel("没有匹配标签，可以换一个关键词"))
 
         def _group_visible_tags(self, terms: list[str]) -> dict[str, list[tuple[str, dict[str, Any]]]]:
             grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {"story": [], "writing": []}
@@ -632,26 +997,19 @@ if PYSIDE6_AVAILABLE:
         def _add_tag_button_group(
             self,
             entries: list[tuple[str, dict[str, Any]]],
-            row: int,
-            max_columns: int,
-        ) -> int:
-            column = 0
+        ) -> None:
             for field, tag in entries:
                 tag_id = str(tag.get("id", ""))
                 button = QPushButton(str(tag.get("label", tag_id)))
                 button.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
                 button.clicked.connect(lambda _checked=False, f=field, t=tag_id: self._cycle_tag_state(f, t))
-                button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                # 标签按钮只按文字内容取宽度，不再横向填满网格单元格。
+                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                #button.setMinimumHeight(32)  # 固定标签按钮高度，避免不同文字导致按钮视觉拥挤
+                #button.setContentsMargins(0, 0, 6, 0)  # 给按钮自身右侧留一点空隙
                 self.tag_buttons[(field, tag_id)] = button
                 self._style_tag_button(button, self.tag_states.get(field, {}).get(tag_id, 0))
-                self.tag_grid.addWidget(button, row, column)
-                column += 1
-                if column >= max_columns:
-                    column = 0
-                    row += 1
-            if column:
-                row += 1
-            return row
+                self.tag_flow.addWidget(button)
 
         def _tag_matches_query(self, tag: dict[str, Any], terms: list[str]) -> bool:
             if not terms:
@@ -814,7 +1172,10 @@ if PYSIDE6_AVAILABLE:
             self.bridge.stream.connect(self._append_streaming_target)
             self.window = QMainWindow()
             self.window.setWindowTitle(title)
-            self.window.resize(1187, 667)
+            self.window.setWindowFlags(self.window.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            # 手动调整主窗口初始大小的位置：第一个数字是宽度，第二个数字是高度。
+            # 例如可改为 QSize 接近的 1040x680 或 1120x720；不要改回按屏幕比例自动计算。
+            self.window.resize(1260, 775)
             self._build()
             self.refresh_projects()
 
@@ -824,11 +1185,10 @@ if PYSIDE6_AVAILABLE:
 
         def _build(self) -> None:
             root = QWidget()
+            root.setObjectName("AppRoot")
             layout = QVBoxLayout(root)
             layout.setContentsMargins(12, 12, 12, 10)
-            header = QLabel("My AI Novel    结构化小说生产流水线")
-            header.setObjectName("Header")
-            layout.addWidget(header)
+            layout.addWidget(WindowTitleBar("My AI Novel    结构化小说生产流水线", self.window))
 
             shell = QHBoxLayout()
             self.navigation = QListWidget()

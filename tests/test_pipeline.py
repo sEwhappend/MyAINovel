@@ -88,6 +88,22 @@ class FakeLLM:
                 "tags": "AI创建",
                 "status": "candidate",
             }
+        if agent_name == "tagged_character_creator":
+            return {
+                "kind": "character",
+                "name": "林砚",
+                "summary": "标签化生成的主要角色。",
+                "details": {
+                    "identity": "魔法学院转学生",
+                    "personality": "克制但不服输",
+                    "motivation": "查清钟塔记录错误",
+                    "speech_style": "短句，偶尔吐槽",
+                    "role_flags": {"supporting": True},
+                    "modules": {"skill_system": {"summary": "初始技能尚未稳定"}},
+                },
+                "tags": "AI生成",
+                "status": "candidate",
+            }
         if agent_name == "main_character_generator":
             return {
                 "name": "林砚",
@@ -218,6 +234,23 @@ class WorldItemStreamingFakeLLM(FakeLLM):
             '{"kind":"location","name":"流式钟楼广场",',
             '"summary":"流式生成的重要公共空间。","details":{"atmosphere":"钟声压迫"},',
             '"tags":"AI创建,流式","status":"candidate"}',
+        ]
+        for chunk in chunks:
+            on_delta(chunk)
+        return "".join(chunks)
+
+
+class TaggedCharacterStreamingFakeLLM(FakeLLM):
+    config = {"chat_model": "tagged-character-model", "review_model": "review-model"}
+
+    def stream_text(self, model, messages, on_delta):
+        self.stream_model = model
+        self.stream_messages = messages
+        chunks = [
+            '{"kind":"character","name":"流式林砚",',
+            '"summary":"流式标签化角色卡。","details":{"identity":"魔法学院转学生",',
+            '"personality":"克制但不服输","motivation":"查清钟塔记录错误","speech_style":"短句",',
+            '"role_flags":{"supporting":true},"modules":{}},"tags":"AI生成","status":"candidate"}',
         ]
         for chunk in chunks:
             on_delta(chunk)
@@ -1186,6 +1219,57 @@ class PipelineTests(unittest.TestCase):
         payload = json.loads(user_content.split("\n", 1)[1])
         self.assertEqual(payload["current_kind"], "location")
         self.assertNotIn("project_writing_constraints", payload)
+        self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
+
+    def test_generate_tagged_character_saves_character_modules_and_role(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+
+        result = pipeline.generate_tagged_character(
+            self.project_id,
+            {
+                "role_profile": "ensemble_main",
+                "selected_character_tags": ["weak_to_strong", "skill_system"],
+                "generation_direction": "沉默但责任感强",
+            },
+        )
+
+        self.assertEqual(result["world_item"]["kind"], "character")
+        details = json.loads(result["world_item"]["details_json"])
+        self.assertTrue(details["role_flags"]["ensemble_main"])
+        self.assertFalse(details["role_flags"]["protagonist"])
+        self.assertIn("weak_to_strong", details["modules"])
+        self.assertIn("skill_system", details["modules"])
+        self.assertEqual(details["identity"], "魔法学院转学生")
+        self.assertIn("标签化生成", result["world_item"]["tags"])
+        self.assertEqual(llm.calls[0]["agent_name"], "tagged_character_creator")
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["current_kind"], "character")
+        self.assertEqual(payload["character_generation_profile"]["role_profile"], "ensemble_main")
+        self.assertEqual(
+            payload["character_generation_profile"]["selected_character_tags"],
+            ["weak_to_strong", "skill_system"],
+        )
+        self.assertTrue(any(tag["id"] == "skill_system" for tag in payload["selected_tag_definitions"]))
+
+    def test_generate_tagged_character_streaming_uses_stream_output(self) -> None:
+        llm = TaggedCharacterStreamingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        chunks: list[str] = []
+
+        result = pipeline.generate_tagged_character_streaming(
+            self.project_id,
+            {"role_profile": "supporting", "selected_character_tags": ["ts"]},
+            chunks.append,
+        )
+
+        self.assertEqual(result["world_item"]["name"], "流式林砚")
+        self.assertEqual(llm.stream_model, "tagged-character-model")
+        self.assertIn('"name":"流式林砚"', "".join(chunks))
+        details = json.loads(result["world_item"]["details_json"])
+        self.assertTrue(details["role_flags"]["supporting"])
+        self.assertIn("ts", details["modules"])
         self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
 
     def test_write_chapter_memory_upserts_candidates_from_finalized_sections(self) -> None:

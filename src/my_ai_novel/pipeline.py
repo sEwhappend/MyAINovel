@@ -461,12 +461,153 @@ class NovelPipeline:
             raise
         return self._save_generated_world_item(project_id, kind, result)
 
+    def generate_tagged_character(self, project_id: int, profile: dict[str, Any]) -> dict[str, Any]:
+        project = self._require(self.store.get_project(project_id), "project")
+        payload = self._tagged_character_payload(project_id, project, profile)
+        result = self._call("tagged_character_creator", payload)
+        return self._save_tagged_character(project_id, result, payload)
+
+    def generate_tagged_character_streaming(
+        self,
+        project_id: int,
+        profile: dict[str, Any],
+        on_delta=None,
+    ) -> dict[str, Any]:
+        project = self._require(self.store.get_project(project_id), "project")
+        payload = self._tagged_character_payload(project_id, project, profile)
+        messages = build_messages("tagged_character_creator", payload)
+        _append_to_first_system_before_user(
+            messages,
+            "输出必须是 JSON object，字段要求："
+            + json.dumps(SCHEMA_HINTS["tagged_character_creator"], ensure_ascii=False)
+            + "。流式输出时仍只输出这个 JSON object，不要输出说明、寒暄或 Markdown 代码块。",
+        )
+        model = self.llm.config.get("chat_model") or self.llm.config.get("review_model") or ""
+        chunks: list[str] = []
+
+        def collect(delta: str) -> None:
+            chunks.append(delta)
+            if on_delta:
+                on_delta(delta)
+
+        try:
+            text = self.llm.stream_text(model, messages, collect)
+            raw = text or "".join(chunks)
+            result = parse_json_response(raw)
+            self.store.save_llm_call_log(
+                {
+                    "project_id": project_id,
+                    "agent_name": "tagged_character_creator",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": raw[:500],
+                    "success": True,
+                }
+            )
+        except Exception as exc:
+            self.store.save_llm_call_log(
+                {
+                    "project_id": project_id,
+                    "agent_name": "tagged_character_creator",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": "".join(chunks)[:500],
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+            raise
+        return self._save_tagged_character(project_id, result, payload)
+
     def _world_item_creation_payload(self, project_id: int, project: dict[str, Any], kind: str) -> dict[str, Any]:
         payload = {"project": self._world_item_creation_project_context(project), "current_kind": kind}
         outline = self._latest_outline_snapshot(project_id)
         if outline:
             payload["current_outline"] = self._compact_outline_snapshot(outline)
         return payload
+
+    def _tagged_character_payload(
+        self,
+        project_id: int,
+        project: dict[str, Any],
+        profile: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_profile = self._normalized_tagged_character_profile(profile)
+        payload = {
+            "project": self._world_item_creation_project_context(project),
+            "current_kind": "character",
+            "character_generation_profile": normalized_profile,
+            "selected_tag_definitions": self._tagged_character_tag_definitions(normalized_profile),
+            "existing_characters": self._compact_existing_characters(project_id),
+        }
+        outline = self._latest_outline_snapshot(project_id)
+        if outline:
+            payload["current_outline"] = self._compact_outline_snapshot(outline)
+        return payload
+
+    def _normalized_tagged_character_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        profile = profile if isinstance(profile, dict) else {}
+        role_profile = str(profile.get("role_profile") or "protagonist").strip()
+        allowed_roles = {"protagonist", "pov", "ensemble_main", "supporting"}
+        if role_profile not in allowed_roles:
+            role_profile = "protagonist"
+        return {
+            "mode": "tagged_character",
+            "role_profile": role_profile,
+            "selected_character_tags": self._text_list(profile.get("selected_character_tags")),
+            "selected_setting_tags": self._text_list(profile.get("selected_setting_tags")),
+            "selected_style_tags": self._text_list(profile.get("selected_style_tags")),
+            "selected_forbidden_tags": self._text_list(profile.get("selected_forbidden_tags")),
+            "generation_direction": str(profile.get("generation_direction") or "").strip(),
+        }
+
+    def _tagged_character_tag_definitions(self, profile: dict[str, Any]) -> list[dict[str, Any]]:
+        fields = {
+            "selected_character_tags": "character_tags",
+            "selected_setting_tags": "setting_tags",
+            "selected_style_tags": "style_tags",
+            "selected_forbidden_tags": "forbidden_tags",
+        }
+        catalog = list_style_tag_catalog()
+        definitions: list[dict[str, Any]] = []
+        for field, category in fields.items():
+            by_id = {str(tag.get("id", "")): tag for tag in catalog.get(category, [])}
+            for tag_id in self._text_list(profile.get(field)):
+                tag = by_id.get(tag_id)
+                if tag is None:
+                    definitions.append(
+                        {
+                            "category": category,
+                            "id": tag_id,
+                            "label": tag_id,
+                            "style_rule": "",
+                            "usage_rule": "用户本次角色创建选择的自定义标签。",
+                            "requires_memory": False,
+                            "memory_kinds": [],
+                        }
+                    )
+                else:
+                    definitions.append({"category": category, **tag})
+        return definitions
+
+    def _compact_existing_characters(self, project_id: int) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        for item in self.store.list_world_items(project_id, "character"):
+            details = self._loads(item.get("details_json"))
+            fields = character_basic_fields_from_details(details)
+            cards.append(
+                {
+                    "name": item.get("name", ""),
+                    "summary": item.get("summary", ""),
+                    "tags": item.get("tags", ""),
+                    "identity": fields.get("identity", ""),
+                    "personality": fields.get("personality", ""),
+                    "motivation": fields.get("motivation", ""),
+                    "speech_style": fields.get("speech_style", ""),
+                    "role_flags": fields.get("role_flags", {}),
+                }
+            )
+        return cards
 
     def _call_world_item_creator(self, project_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         messages = build_messages("world_item_creator", payload)
@@ -509,6 +650,70 @@ class NovelPipeline:
         item_id = self.store.save_world_item(project_id, created)
         saved = self.store.get_world_item(project_id, item_id) or {**created, "id": item_id}
         return {"world_item_id": item_id, "world_item": saved, **result}
+
+    def _save_tagged_character(
+        self,
+        project_id: int,
+        result: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile = payload.get("character_generation_profile", {})
+        tag_definitions = payload.get("selected_tag_definitions", [])
+        details = result.get("details") if isinstance(result.get("details"), dict) else {}
+        details = self._normalized_tagged_character_details(details, profile, tag_definitions)
+        labels = [
+            str(tag.get("label") or tag.get("id") or "").strip()
+            for tag in tag_definitions
+            if str(tag.get("label") or tag.get("id") or "").strip()
+        ]
+        saved_result = {
+            **result,
+            "kind": "character",
+            "details": details,
+            "tags": self._merge_csv(result.get("tags", ""), "角色卡,AI生成,标签化生成", ",".join(labels)),
+            "status": result.get("status") or "candidate",
+        }
+        return self._save_generated_world_item(project_id, "character", saved_result)
+
+    def _normalized_tagged_character_details(
+        self,
+        details: dict[str, Any],
+        profile: dict[str, Any],
+        tag_definitions: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        details = dict(details)
+        role = str(profile.get("role_profile") or "protagonist").strip()
+        details["role_flags"] = {
+            "protagonist": role == "protagonist",
+            "pov": role == "pov",
+            "ensemble_main": role == "ensemble_main",
+            "supporting": role == "supporting",
+        }
+        modules = details.get("modules")
+        if not isinstance(modules, dict):
+            modules = {}
+        for tag in tag_definitions:
+            tag_id = str(tag.get("id", "") or "").strip()
+            memory_kinds = tag.get("memory_kinds", [])
+            if (
+                tag_id
+                and tag.get("requires_memory")
+                and isinstance(memory_kinds, list)
+                and "character" in memory_kinds
+                and tag_id not in modules
+            ):
+                usage_rule = str(tag.get("usage_rule") or "").strip()
+                modules[tag_id] = {
+                    "enabled": True,
+                    "summary": usage_rule or str(tag.get("style_rule") or "").strip(),
+                    "constraints": [usage_rule] if usage_rule else [],
+                }
+        details["modules"] = modules
+        if not isinstance(details.get("relationships"), list):
+            details["relationships"] = []
+        for key in ("identity", "personality", "motivation", "speech_style"):
+            details[key] = str(details.get(key, "") or "").strip()
+        return details
 
     def _world_item_creation_project_context(self, project: dict[str, Any]) -> dict[str, Any]:
         return {

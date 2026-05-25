@@ -1185,6 +1185,174 @@ if PYSIDE6_AVAILABLE:
             self.accept()
 
 
+    class TaggedCharacterCreationDialog(QDialog):
+        def __init__(self, owner: "NovelDesktopUI") -> None:
+            super().__init__(owner.window)
+            self.owner = owner
+            self.tag_states: dict[str, int] = {}
+            self.tag_buttons: dict[str, QPushButton] = {}
+            self.tag_catalog: list[dict[str, Any]] = []
+            self.role_structure_tag_ids = {"single_protagonist", "dual_protagonists"}
+            self.setWindowTitle("标签化生成角色卡")
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            _apply_windows_round_corners(self)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(WindowTitleBar("标签化生成角色卡", self))
+
+            query_title = QLabel("搜索式需求")
+            query_title.setObjectName("PanelTitle")
+            layout.addWidget(query_title)
+            self.query_input = QLineEdit()
+            self.query_input.setPlaceholderText("输入角色方向或标签，例如：TS 弱到强 主视角 不要龙傲天")
+            self.query_input.textChanged.connect(lambda _text: self._refresh_tag_buttons())
+            layout.addWidget(self.query_input)
+            layout.addWidget(QLabel("相关标签：点一下选中，再点一下变为红色排除，再点一下恢复默认"))
+
+            body = QHBoxLayout()
+            filter_column = QVBoxLayout()
+            tag_title = QLabel("标签/排除项")
+            tag_title.setObjectName("PanelTitle")
+            filter_column.addWidget(tag_title)
+            self.tag_scroll = QScrollArea()
+            self.tag_scroll.setWidgetResizable(True)
+            self.tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            self.tag_scroll.setViewportMargins(0, 0, 12, 0)
+            self.tag_scroll.setMinimumHeight(260)
+            self.tag_host = QWidget()
+            self.tag_flow = TagFlowLayout(self.tag_host)
+            self.tag_scroll.setWidget(self.tag_host)
+            filter_column.addWidget(self.tag_scroll, 1)
+            body.addLayout(filter_column, 1)
+
+            detail_column = QVBoxLayout()
+            role_title = QLabel("角色定位与方向")
+            role_title.setObjectName("PanelTitle")
+            detail_column.addWidget(role_title)
+            self.role_combo = QComboBox()
+            for key, label in [
+                ("protagonist", "主角"),
+                ("pov", "POV"),
+                ("ensemble_main", "群像主要角色"),
+                ("supporting", "重要配角"),
+            ]:
+                self.role_combo.addItem(label, key)
+            detail_column.addWidget(QLabel("角色定位"))
+            detail_column.addWidget(self.role_combo)
+            self.protagonist_structure_combo = QComboBox()
+            self.protagonist_structure_combo.addItem("单主角", "single_protagonist")
+            self.protagonist_structure_combo.addItem("双主角", "dual_protagonists")
+            detail_column.addWidget(QLabel("主角结构"))
+            detail_column.addWidget(self.protagonist_structure_combo)
+            detail_column.addWidget(QLabel("生成方向"))
+            self.direction_edit = QTextEdit()
+            self.direction_edit.setObjectName("StreamingOutput")
+            self.direction_edit.setPlaceholderText("可选：写明本次角色创建方向，例如“生成一名沉默但责任感强的魔法学院转学生”。")
+            self.direction_edit.setMinimumHeight(160)
+            self.direction_edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            detail_column.addWidget(self.direction_edit, 1)
+            body.addLayout(detail_column, 1)
+            layout.addLayout(body, 1)
+
+            self._build_tag_buttons()
+
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            self.status_label = QLabel("选择角色定位、生成方向和角色标签后开始生成")
+            self.status_label.setObjectName("Status")
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setObjectName("LlmProgress")
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_bar.setVisible(False)
+            layout.addWidget(self.progress_bar)
+            footer = QHBoxLayout()
+            footer.addWidget(self.status_label, 1)
+            footer.addWidget(buttons)
+            layout.addLayout(footer)
+            owner._resize_dialog_to_window(self)
+
+        def _build_tag_buttons(self) -> None:
+            for tag in list_style_tag_catalog().get("character_tags", []):
+                tag_id = str(tag.get("id", "") or "").strip()
+                if not tag_id or tag_id in self.role_structure_tag_ids or tag_id in self.tag_states:
+                    continue
+                self.tag_states[tag_id] = 0
+                self.tag_catalog.append(dict(tag))
+            self._refresh_tag_buttons()
+
+        def _refresh_tag_buttons(self) -> None:
+            while self.tag_flow.count():
+                item = self.tag_flow.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            self.tag_buttons = {}
+            query = self.query_input.text().strip().lower() if hasattr(self, "query_input") else ""
+            terms = [term for term in query.replace("，", " ").replace(",", " ").split() if term]
+            visible_tags = self._visible_tags(terms)
+            self._add_tag_button_group(visible_tags)
+            if not self.tag_buttons:
+                self.tag_flow.addWidget(QLabel("没有匹配标签，可以换一个关键词"))
+
+        def _visible_tags(self, terms: list[str]) -> list[dict[str, Any]]:
+            return [tag for tag in self.tag_catalog if self._tag_matches_query(tag, terms)]
+
+        def _add_tag_button_group(self, entries: list[dict[str, Any]]) -> None:
+            for tag in entries:
+                tag_id = str(tag.get("id", ""))
+                button = QPushButton(str(tag.get("label", tag_id)))
+                button.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
+                button.clicked.connect(lambda _checked=False, t=tag_id: self._cycle_tag_state(t))
+                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                self.tag_buttons[tag_id] = button
+                self._style_tag_button(button, self.tag_states.get(tag_id, 0))
+                self.tag_flow.addWidget(button)
+
+        def _tag_matches_query(self, tag: dict[str, Any], terms: list[str]) -> bool:
+            if not terms:
+                return True
+            haystack = " ".join(
+                str(tag.get(key, ""))
+                for key in ("id", "label", "style_rule", "usage_rule")
+            ).lower()
+            return any(term in haystack for term in terms)
+
+        def _cycle_tag_state(self, tag_id: str) -> None:
+            state = (self.tag_states.get(tag_id, 0) + 1) % 3
+            self.tag_states[tag_id] = state
+            button = self.tag_buttons.get(tag_id)
+            if button is not None:
+                self._style_tag_button(button, state)
+
+        def _style_tag_button(self, button: QPushButton, state: int) -> None:
+            if state == 1:
+                button.setStyleSheet("background: #eaf3ff; border: 1px solid #6fa8ff; color: #1f4f99;")
+            elif state == 2:
+                button.setStyleSheet("background: #ffe9ec; border: 1px solid #e56b73; color: #b63a45;")
+            else:
+                button.setStyleSheet("")
+
+        def generation_profile(self) -> dict[str, Any]:
+            role_structure_tag = str(self.protagonist_structure_combo.currentData() or "single_protagonist")
+            selected = [role_structure_tag] + [tag_id for tag_id, state in self.tag_states.items() if state == 1]
+            excluded = [tag_id for tag_id, state in self.tag_states.items() if state == 2]
+            return {
+                "search_query": self.query_input.text().strip(),
+                "role_profile": str(self.role_combo.currentData() or "protagonist"),
+                "selected_character_tags": selected,
+                "selected_setting_tags": [],
+                "selected_style_tags": [],
+                "selected_forbidden_tags": excluded,
+                "exclude_tags": excluded,
+                "generation_direction": self.direction_edit.toPlainText().strip(),
+            }
+
+
     class NovelDesktopUI:
         def __init__(self, services: ApplicationServices, title: str) -> None:
             self.services = services
@@ -2627,6 +2795,23 @@ if PYSIDE6_AVAILABLE:
             if not project_id:
                 return
             kind = world_kind_value(self.world_kind.currentText())
+            if kind == "character":
+                mode = self._ask_character_creation_mode()
+                if mode is None:
+                    return
+                if mode == "tagged":
+                    profile = self._ask_tagged_character_profile()
+                    if profile is None:
+                        return
+                    self._clear_world_form(reset_kind=False)
+                    self.world_summary.setPlainText("正在根据角色标签生成角色卡 JSON...\n")
+                    self._run_async(
+                        lambda: self._run_streaming_tagged_character(project_id, profile),
+                        "正在标签化生成角色卡，请稍候...",
+                        "角色卡已标签化生成",
+                        self._after_create_world_item_with_ai,
+                    )
+                    return
             self._clear_world_form(reset_kind=False)
             self.world_summary.setPlainText("正在连接模型，准备流式生成资料 JSON...\n")
             self._run_async(
@@ -2635,6 +2820,27 @@ if PYSIDE6_AVAILABLE:
                 "资料已自动创建",
                 self._after_create_world_item_with_ai,
             )
+
+        def _ask_character_creation_mode(self) -> str | None:
+            dialog = QMessageBox(self.window)
+            dialog.setWindowTitle("创建角色卡")
+            dialog.setText("请选择角色卡 AI 自动创建方式。")
+            normal_button = dialog.addButton("普通生成", QMessageBox.ButtonRole.AcceptRole)
+            tagged_button = dialog.addButton("标签化生成", QMessageBox.ButtonRole.ActionRole)
+            dialog.addButton(QMessageBox.StandardButton.Cancel)
+            dialog.exec()
+            clicked = dialog.clickedButton()
+            if clicked == normal_button:
+                return "normal"
+            if clicked == tagged_button:
+                return "tagged"
+            return None
+
+        def _ask_tagged_character_profile(self) -> dict[str, Any] | None:
+            dialog = TaggedCharacterCreationDialog(self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return dialog.generation_profile()
 
         def _after_create_world_item_with_ai(self, result: dict[str, Any]) -> str:
             item = result.get("world_item", {}) if isinstance(result, dict) else {}
@@ -3030,6 +3236,20 @@ if PYSIDE6_AVAILABLE:
             if hasattr(self.pipeline, "generate_world_item_streaming"):
                 return self.pipeline.generate_world_item_streaming(project_id, kind, on_delta)
             result = self.pipeline.generate_world_item(project_id, kind)
+            preview = json.dumps(result.get("world_item", result), ensure_ascii=False, indent=2)
+            on_delta(preview)
+            return result
+
+        def _run_streaming_tagged_character(self, project_id: int, profile: dict[str, Any]) -> dict[str, Any]:
+            self.bridge.stream.emit("world_item", "")
+
+            def on_delta(delta: str) -> None:
+                if delta:
+                    self.bridge.stream.emit("world_item", delta)
+
+            if hasattr(self.pipeline, "generate_tagged_character_streaming"):
+                return self.pipeline.generate_tagged_character_streaming(project_id, profile, on_delta)
+            result = self.pipeline.generate_tagged_character(project_id, profile)
             preview = json.dumps(result.get("world_item", result), ensure_ascii=False, indent=2)
             on_delta(preview)
             return result

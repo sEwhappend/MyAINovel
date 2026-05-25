@@ -2169,6 +2169,57 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn('"world_item": self.world_summary', source)
         self.assertNotIn("self.world_ai_direction = QTextEdit()", source)
 
+    def test_pyside_character_world_item_can_use_tagged_generation(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _ask_character_creation_mode", source)
+        self.assertIn("class TaggedCharacterCreationDialog(QDialog)", source)
+        self.assertIn('WindowTitleBar("标签化生成角色卡", self)', source)
+        self.assertIn("def _ask_tagged_character_profile", source)
+        self.assertIn("标签化生成角色卡", source)
+        self.assertIn("def _run_streaming_tagged_character", source)
+        self.assertIn("generate_tagged_character_streaming(project_id, profile, on_delta)", source)
+        self.assertIn("正在根据角色标签生成角色卡 JSON", source)
+        self.assertIn("dialog = TaggedCharacterCreationDialog(self)", source)
+
+        search_dialog_block = source[
+            source.index("class SearchProjectCreationDialog(QDialog)"):
+            source.index("def _generate_search_creation_candidates")
+        ]
+        character_dialog_start = source.index("class TaggedCharacterCreationDialog(QDialog)")
+        character_dialog_end = source.index("def _ask_tagged_character_profile", character_dialog_start)
+        character_dialog_block = source[character_dialog_start:character_dialog_end]
+
+        for required in [
+            "TagFlowLayout",
+            "self.tag_flow = TagFlowLayout(self.tag_host)",
+            "self.query_input.textChanged.connect",
+            "self._refresh_tag_buttons()",
+            "def _refresh_tag_buttons",
+            "def _cycle_tag_state",
+            "def _style_tag_button",
+            "self._style_tag_button(button,",
+            "self.tag_states",
+            "self.tag_buttons",
+            "selected_character_tags",
+            "self.role_structure_tag_ids",
+            "self.protagonist_structure_combo",
+            'self.protagonist_structure_combo.addItem("单主角", "single_protagonist")',
+            'self.protagonist_structure_combo.addItem("双主角", "dual_protagonists")',
+            "role_structure_tag = str(self.protagonist_structure_combo.currentData()",
+        ]:
+            self.assertIn(required, character_dialog_block)
+
+        self.assertTrue(
+            "selected_forbidden_tags" in character_dialog_block or "exclude_tags" in character_dialog_block
+        )
+        self.assertIn("tag_id in self.role_structure_tag_ids", character_dialog_block)
+        self.assertIn("def _visible_tags", character_dialog_block)
+        self.assertNotIn('("故事标签", grouped_tags["story"])', character_dialog_block)
+        self.assertNotIn('("写作标签", grouped_tags["writing"])', character_dialog_block)
+        self.assertIn("def _cycle_tag_state", search_dialog_block)
+        self.assertIn("def _style_tag_button", search_dialog_block)
+        self.assertIn("self.query_input.textChanged.connect(lambda _text: self._refresh_tag_buttons())", search_dialog_block)
+
     def test_pyside_outline_page_owns_planning_mode_and_word_fields(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         project_block = source[source.index("def _build_project_page"):source.index("def _build_project_tag_controls")]

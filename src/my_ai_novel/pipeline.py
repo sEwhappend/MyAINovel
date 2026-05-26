@@ -20,6 +20,16 @@ OUTLINE_MODE_SERIAL = "serial"
 SERIAL_ACTION_REVISE_CURRENT = "revise_current"
 SERIAL_ACTION_NEXT_PART = "next_part"
 MIN_SECTION_TARGET_WORDS = 100
+PROJECT_ASSIST_PATCH_FIELDS = (
+    "title",
+    "genre",
+    "style",
+    "target_readers",
+    "pov",
+    "world_summary",
+    "writing_style_guide",
+    "global_concept",
+)
 
 
 def _append_to_first_system_before_user(messages: list[dict[str, str]], content: str) -> None:
@@ -192,6 +202,126 @@ class NovelPipeline:
             "global_concept": global_concept,
         }
         return draft
+
+    def assist_project_edit(self, profile: dict[str, Any]) -> dict[str, Any]:
+        payload = self._project_assist_payload(profile)
+        result = self._call("project_assistant", payload)
+        return self._normalized_project_assist_result(result)
+
+    def assist_project_edit_streaming(self, profile: dict[str, Any], on_delta=None) -> dict[str, Any]:
+        payload = self._project_assist_payload(profile)
+        messages = build_messages("project_assistant", payload)
+        _append_to_first_system_before_user(
+            messages,
+            "输出必须是 JSON object，字段要求："
+            + json.dumps(SCHEMA_HINTS["project_assistant"], ensure_ascii=False)
+            + "。流式输出时仍只输出这个 JSON object，不要输出说明、寒暄或 Markdown 代码块。",
+        )
+        config = getattr(self.llm, "config", {})
+        model = config.get("chat_model") or config.get("review_model") or ""
+        chunks: list[str] = []
+
+        def collect(delta: str) -> None:
+            chunks.append(delta)
+            if on_delta:
+                on_delta(delta)
+
+        try:
+            text = self.llm.stream_text(model, messages, collect)
+            raw = text or "".join(chunks)
+            result = self._normalized_project_assist_result(parse_json_response(raw))
+            self.store.save_llm_call_log(
+                {
+                    "project_id": payload.get("project", {}).get("id") or payload.get("project_id"),
+                    "agent_name": "project_assistant",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": raw[:500],
+                    "success": True,
+                }
+            )
+        except Exception as exc:
+            self.store.save_llm_call_log(
+                {
+                    "project_id": payload.get("project", {}).get("id") or payload.get("project_id"),
+                    "agent_name": "project_assistant",
+                    "model": model,
+                    "request_summary": self._request_summary(payload),
+                    "response_summary": "".join(chunks)[:500],
+                    "success": False,
+                    "error": str(exc),
+                }
+            )
+            raise
+        return result
+
+    def _project_assist_payload(self, profile: dict[str, Any] | None) -> dict[str, Any]:
+        profile = dict(profile or {})
+        selected_tags = profile.get("selected_tags")
+        if not isinstance(selected_tags, dict):
+            selected_tags = {}
+        normalized_tags = self._normalized_selected_tags(selected_tags)
+        return {
+            "project_id": profile.get("project_id"),
+            "project": self._compact_project_for_assist(profile.get("project")),
+            "selected_tags": {
+                "selected_genre_tags": self._text_list(normalized_tags.get("genre")),
+                "selected_setting_tags": self._text_list(normalized_tags.get("setting")),
+                "selected_character_tags": self._text_list(normalized_tags.get("character")),
+                "selected_structure_tags": self._text_list(normalized_tags.get("structure")),
+                "selected_style_tags": self._text_list(normalized_tags.get("style")),
+                "selected_forbidden_tags": self._text_list(normalized_tags.get("forbidden")),
+            },
+            "exclude_tags": self._text_list(profile.get("exclude_tags")),
+            "dialogue_quote_style": str(profile.get("dialogue_quote_style") or "cn_quotes").strip(),
+            "direction": str(profile.get("direction") or "").strip(),
+            "selected_tag_definitions": self._project_assist_tag_definitions(normalized_tags),
+        }
+
+    @staticmethod
+    def _compact_project_for_assist(project: Any) -> dict[str, Any]:
+        project = project if isinstance(project, dict) else {}
+        fields = ("id", *PROJECT_ASSIST_PATCH_FIELDS)
+        return {field: project.get(field, "") for field in fields if project.get(field) not in (None, "")}
+
+    def _project_assist_tag_definitions(self, normalized_tags: dict[str, Any]) -> list[dict[str, Any]]:
+        fields = {
+            "genre": "genre_tags",
+            "setting": "setting_tags",
+            "character": "character_tags",
+            "structure": "structure_tags",
+            "style": "style_tags",
+            "forbidden": "forbidden_tags",
+        }
+        catalog = list_style_tag_catalog()
+        definitions: list[dict[str, Any]] = []
+        for field, category in fields.items():
+            by_id = {str(tag.get("id", "")): tag for tag in catalog.get(category, [])}
+            for tag_id in self._text_list(normalized_tags.get(field)):
+                tag = by_id.get(tag_id)
+                if tag is None:
+                    definitions.append({"category": category, "id": tag_id, "label": tag_id})
+                else:
+                    definitions.append({"category": category, **tag})
+        return definitions
+
+    @staticmethod
+    def _normalized_project_assist_result(result: dict[str, Any]) -> dict[str, Any]:
+        result = result if isinstance(result, dict) else {}
+        patch = result.get("project_patch") if isinstance(result.get("project_patch"), dict) else {}
+        normalized_patch = {
+            field: str(patch.get(field) or "").strip()
+            for field in PROJECT_ASSIST_PATCH_FIELDS
+            if str(patch.get(field) or "").strip()
+        }
+        warnings = result.get("warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+        return {
+            "project_patch": normalized_patch,
+            "reasoning_summary": str(result.get("reasoning_summary") or "").strip(),
+            "warnings": [str(item).strip() for item in warnings if str(item).strip()],
+        }
 
     def expand_global_concept(self, project_id: int, planning_options: dict[str, Any] | None = None) -> dict[str, Any]:
         project = self._require(self.store.get_project(project_id), "project")

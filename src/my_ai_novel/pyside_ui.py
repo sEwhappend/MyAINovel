@@ -1020,7 +1020,7 @@ if PYSIDE6_AVAILABLE:
             query = self.query_input.text().strip().lower() if hasattr(self, "query_input") else ""
             terms = [term for term in query.replace("，", " ").replace(",", " ").split() if term]
             grouped_tags = self._group_visible_tags(terms)
-            for title, entries in (("故事标签", grouped_tags["story"]), ("写作标签", grouped_tags["writing"])):
+            for title, entries in grouped_tags:
                 if not entries:
                     continue
                 header = QLabel(title)
@@ -1031,14 +1031,20 @@ if PYSIDE6_AVAILABLE:
             if not self.tag_buttons:
                 self.tag_flow.addWidget(QLabel("没有匹配标签，可以换一个关键词"))
 
-        def _group_visible_tags(self, terms: list[str]) -> dict[str, list[tuple[str, dict[str, Any]]]]:
-            grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {"story": [], "writing": []}
+        def _group_visible_tags(self, terms: list[str]) -> list[tuple[str, list[tuple[str, dict[str, Any]]]]]:
+            labels = {
+                "selected_genre_tags": "题材标签",
+                "selected_setting_tags": "设定标签",
+                "selected_character_tags": "角色标签",
+                "selected_structure_tags": "结构标签",
+                "selected_style_tags": "风格标签",
+                "selected_forbidden_tags": "排除/禁止标签",
+            }
+            grouped: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = []
             for field, tags in self.tag_catalog.items():
-                for tag in tags:
-                    if not self._tag_matches_query(tag, terms):
-                        continue
-                    group = "story" if bool(tag.get("requires_memory")) else "writing"
-                    grouped[group].append((field, tag))
+                entries = [(field, tag) for tag in tags if self._tag_matches_query(tag, terms)]
+                if entries:
+                    grouped.append((labels.get(field, field), entries))
             return grouped
 
         def _add_tag_button_group(
@@ -1353,6 +1359,272 @@ if PYSIDE6_AVAILABLE:
             }
 
 
+    class ProjectTagAssistDialog(QDialog):
+        def __init__(self, owner: "NovelDesktopUI") -> None:
+            super().__init__(owner.window)
+            self.owner = owner
+            self.tag_states: dict[str, dict[str, int]] = {}
+            self.tag_buttons: dict[tuple[str, str], QPushButton] = {}
+            self.tag_catalog: dict[str, list[dict[str, Any]]] = {}
+            self.last_project_patch: dict[str, str] = {}
+            self.setWindowTitle("选择标签/辅助修改")
+            self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
+            _apply_windows_round_corners(self)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(WindowTitleBar("选择标签/辅助修改", self))
+            query_title = QLabel("搜索式需求")
+            query_title.setObjectName("PanelTitle")
+            layout.addWidget(query_title)
+            self.query_input = QLineEdit()
+            self.query_input.setPlaceholderText("输入标签或修改方向关键词，例如：异世界 轻小说 不要后宫")
+            self.query_input.textChanged.connect(lambda _text: self._refresh_tag_buttons())
+            layout.addWidget(self.query_input)
+            layout.addWidget(QLabel("相关标签：点一下选中，再点一下变为红色排除，再点一下恢复默认"))
+
+            body = QHBoxLayout()
+            filter_column = QVBoxLayout()
+            tag_title = QLabel("标签/排除项")
+            tag_title.setObjectName("PanelTitle")
+            filter_column.addWidget(tag_title)
+            self.tag_scroll = QScrollArea()
+            self.tag_scroll.setWidgetResizable(True)
+            self.tag_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.tag_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+            self.tag_scroll.setViewportMargins(0, 0, 12, 0)
+            self.tag_scroll.setMinimumHeight(260)
+            self.tag_host = QWidget()
+            self.tag_flow = TagFlowLayout(self.tag_host)
+            self.tag_scroll.setWidget(self.tag_host)
+            filter_column.addWidget(self.tag_scroll, 1)
+            body.addLayout(filter_column, 1)
+
+            detail_column = QVBoxLayout()
+            detail_title = QLabel("辅助修改")
+            detail_title.setObjectName("PanelTitle")
+            detail_column.addWidget(detail_title)
+            detail_column.addWidget(QLabel("对白引号"))
+            self.quote_combo = QComboBox()
+            for quote_id, item in DIALOGUE_QUOTE_STYLES.items():
+                self.quote_combo.addItem(str(item["label"]), quote_id)
+            quote_index = self.quote_combo.findData(getattr(owner, "dialogue_quote_style_value", "cn_quotes"))
+            self.quote_combo.setCurrentIndex(quote_index if quote_index >= 0 else 0)
+            detail_column.addWidget(self.quote_combo)
+            detail_column.addWidget(QLabel("修改方向"))
+            self.direction_edit = QTextEdit()
+            self.direction_edit.setPlaceholderText("可选：例如强化日式轻小说感、统一叙事视角、把世界观改得更偏学院、减少后宫感。")
+            self.direction_edit.setMinimumHeight(90)
+            detail_column.addWidget(self.direction_edit)
+            self.generate_button = QPushButton("生成修改建议")
+            self.generate_button.setProperty("primary", True)
+            self.generate_button.clicked.connect(self._generate_project_patch)
+            self.apply_button = QPushButton("应用修改到项目表单")
+            self.apply_button.clicked.connect(self._apply_project_patch)
+            detail_column.addWidget(self.generate_button)
+            detail_column.addWidget(self.apply_button)
+            detail_column.addWidget(QLabel("流式输出/修改建议"))
+            self.detail_text = QTextEdit()
+            self.detail_text.setObjectName("StreamingOutput")
+            self.detail_text.setReadOnly(True)
+            self.detail_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            detail_column.addWidget(self.detail_text, 1)
+            body.addLayout(detail_column, 1)
+            layout.addLayout(body, 1)
+
+            self._build_tag_buttons()
+
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.accepted.connect(self._accept_tag_settings)
+            buttons.rejected.connect(self.reject)
+            self.status_label = QLabel("可只修改标签与引号，也可生成 AI 辅助修改建议")
+            self.status_label.setObjectName("Status")
+            self.progress_bar = QProgressBar()
+            self.progress_bar.setObjectName("LlmProgress")
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setTextVisible(False)
+            self.progress_bar.setVisible(False)
+            layout.addWidget(self.progress_bar)
+            footer = QHBoxLayout()
+            footer.addWidget(self.status_label, 1)
+            footer.addWidget(buttons)
+            layout.addLayout(footer)
+            owner._resize_dialog_to_window(self)
+
+        def _build_tag_buttons(self) -> None:
+            catalog = list_style_tag_catalog()
+            current_selection = getattr(self.owner, "project_tag_selection", {})
+            for field, category in FIELD_TO_CATEGORY.items():
+                self.tag_states[field] = {}
+                self.tag_catalog[field] = []
+                selected = set(current_selection.get(field, []))
+                for tag in catalog.get(category, []):
+                    tag_id = str(tag.get("id", "") or "").strip()
+                    if not tag_id:
+                        continue
+                    self.tag_states[field][tag_id] = 1 if tag_id in selected else 0
+                    self.tag_catalog[field].append(dict(tag))
+            self._refresh_tag_buttons()
+
+        def _refresh_tag_buttons(self) -> None:
+            while self.tag_flow.count():
+                item = self.tag_flow.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            self.tag_buttons = {}
+            query = self.query_input.text().strip().lower() if hasattr(self, "query_input") else ""
+            terms = [term for term in query.replace("，", " ").replace(",", " ").split() if term]
+            for title, entries in self._group_visible_tags(terms):
+                if not entries:
+                    continue
+                header = QLabel(title)
+                header.setObjectName("PanelTitle")
+                header.setProperty("flow_full_row", True)
+                self.tag_flow.addWidget(header)
+                self._add_tag_button_group(entries)
+            if not self.tag_buttons:
+                self.tag_flow.addWidget(QLabel("没有匹配标签，可以换一个关键词"))
+
+        def _group_visible_tags(self, terms: list[str]) -> list[tuple[str, list[tuple[str, dict[str, Any]]]]]:
+            labels = {
+                "selected_genre_tags": "题材标签",
+                "selected_setting_tags": "设定标签",
+                "selected_character_tags": "角色标签",
+                "selected_structure_tags": "结构标签",
+                "selected_style_tags": "风格标签",
+                "selected_forbidden_tags": "排除/禁止标签",
+            }
+            groups: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = []
+            for field, tags in self.tag_catalog.items():
+                entries = [(field, tag) for tag in tags if self._tag_matches_query(tag, terms)]
+                if entries:
+                    groups.append((labels.get(field, field), entries))
+            return groups
+
+        def _add_tag_button_group(self, entries: list[tuple[str, dict[str, Any]]]) -> None:
+            for field, tag in entries:
+                tag_id = str(tag.get("id", ""))
+                button = QPushButton(str(tag.get("label", tag_id)))
+                button.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
+                button.clicked.connect(lambda _checked=False, f=field, t=tag_id: self._cycle_tag_state(f, t))
+                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                self.tag_buttons[(field, tag_id)] = button
+                self._style_tag_button(button, self.tag_states.get(field, {}).get(tag_id, 0))
+                self.tag_flow.addWidget(button)
+
+        def _tag_matches_query(self, tag: dict[str, Any], terms: list[str]) -> bool:
+            if not terms:
+                return True
+            haystack = " ".join(
+                str(tag.get(key, ""))
+                for key in ("id", "label", "style_rule", "usage_rule")
+            ).lower()
+            return any(term in haystack for term in terms)
+
+        def _cycle_tag_state(self, field: str, tag_id: str) -> None:
+            state = (self.tag_states.get(field, {}).get(tag_id, 0) + 1) % 3
+            self.tag_states.setdefault(field, {})[tag_id] = state
+            button = self.tag_buttons.get((field, tag_id))
+            if button is not None:
+                self._style_tag_button(button, state)
+
+        def _style_tag_button(self, button: QPushButton, state: int) -> None:
+            if state == 1:
+                button.setStyleSheet("background: #eaf3ff; border: 1px solid #6fa8ff; color: #1f4f99;")
+            elif state == 2:
+                button.setStyleSheet("background: #ffe9ec; border: 1px solid #e56b73; color: #b63a45;")
+            else:
+                button.setStyleSheet("")
+
+        def _generation_profile(self) -> dict[str, Any]:
+            selected_tags = {
+                field: [tag_id for tag_id, state in states.items() if state == 1]
+                for field, states in self.tag_states.items()
+            }
+            excluded = self._excluded_tag_ids()
+            if excluded:
+                selected_tags.setdefault("selected_forbidden_tags", [])
+                selected_tags["selected_forbidden_tags"] = list(
+                    dict.fromkeys([*selected_tags["selected_forbidden_tags"], *excluded])
+                )
+            return {
+                "project_id": self.owner.current_project_id,
+                "project": self.owner._current_project_form_data(),
+                "selected_tags": selected_tags,
+                "exclude_tags": excluded,
+                "dialogue_quote_style": str(self.quote_combo.currentData() or "cn_quotes"),
+                "direction": self.direction_edit.toPlainText().strip(),
+            }
+
+        def _excluded_tag_ids(self) -> list[str]:
+            excluded: list[str] = []
+            for states in self.tag_states.values():
+                excluded.extend(tag_id for tag_id, state in states.items() if state == 2)
+            return excluded
+
+        def _accept_tag_settings(self) -> None:
+            self.owner.project_tag_selection = self._generation_profile()["selected_tags"]
+            self.owner.dialogue_quote_style_value = str(self.quote_combo.currentData() or "cn_quotes")
+            self.owner._update_project_tag_summary()
+            self.accept()
+
+        def _generate_project_patch(self) -> None:
+            if getattr(self.owner, "_async_busy", False):
+                self.owner._error("已有后台任务运行中，请稍候")
+                return
+            self._accept_tag_settings_without_close()
+            self.last_project_patch = {}
+            self.detail_text.setPlainText("")
+            self._set_generation_busy(True, "正在生成项目修改建议...")
+            self.owner._temporary_stream_targets["project_assist"] = self.detail_text
+            profile = self._generation_profile()
+
+            def action() -> dict[str, Any]:
+                try:
+                    return {"ok": True, "result": self.owner._run_streaming_project_assist(profile)}
+                except Exception as exc:
+                    return {"ok": False, "error": str(exc)}
+
+            self.owner._run_async(action, "正在生成项目修改建议...", "", self._after_generate_project_patch)
+
+        def _accept_tag_settings_without_close(self) -> None:
+            self.owner.project_tag_selection = self._generation_profile()["selected_tags"]
+            self.owner.dialogue_quote_style_value = str(self.quote_combo.currentData() or "cn_quotes")
+            self.owner._update_project_tag_summary()
+
+        def _after_generate_project_patch(self, result: dict[str, Any]) -> bool:
+            self._set_generation_busy(False, "")
+            self.owner._temporary_stream_targets.pop("project_assist", None)
+            self.owner.refresh_logs()
+            if not result.get("ok"):
+                self.status_label.setText(str(result.get("error") or "生成修改建议失败"))
+                self.owner._error(str(result.get("error") or "生成修改建议失败"))
+                return False
+            payload = result.get("result", {}) if isinstance(result, dict) else {}
+            self.last_project_patch = payload.get("project_patch", {}) if isinstance(payload, dict) else {}
+            if self.last_project_patch:
+                self.status_label.setText("已生成修改建议，可点击“应用修改到项目表单”")
+            else:
+                self.status_label.setText("未生成可应用的字段修改，请调整修改方向后重试")
+            return False
+
+        def _apply_project_patch(self) -> None:
+            if not self.last_project_patch:
+                self.owner._error("请先生成修改建议")
+                return
+            self.owner._apply_project_patch_to_form(self.last_project_patch)
+            self.status_label.setText("修改建议已应用到项目表单，请回到项目页保存")
+
+        def _set_generation_busy(self, busy: bool, message: str) -> None:
+            self.generate_button.setEnabled(not busy)
+            self.apply_button.setEnabled(not busy)
+            self.progress_bar.setVisible(busy)
+            if message:
+                self.status_label.setText(message)
+
+
     class NovelDesktopUI:
         def __init__(self, services: ApplicationServices, title: str) -> None:
             self.services = services
@@ -1567,7 +1839,7 @@ if PYSIDE6_AVAILABLE:
         def _build_project_tag_controls(self, parent: QVBoxLayout) -> None:
             self.project_tag_summary = QLabel("未选择标签；对白引号：中文弯引号")
             parent.addWidget(self.project_tag_summary)
-            parent.addWidget(self._button("选择标签与引号", self.edit_project_tags_dialog))
+            parent.addWidget(self._button("选择标签/辅助修改", self.edit_project_tags_dialog))
 
         def _build_outline_page(self) -> None:
             page = self._add_page("总框架")
@@ -1914,6 +2186,24 @@ if PYSIDE6_AVAILABLE:
         def _clear_project_tag_data(self) -> None:
             self._set_project_tag_data({})
 
+        def _current_project_form_data(self) -> dict[str, Any]:
+            data = {key: self._text(widget) for key, widget in self.project_fields.items()}
+            data.update({key: self._text(widget) for key, widget in self.project_texts.items()})
+            data.update(self._project_tag_data())
+            if self.current_project_id:
+                data["id"] = self.current_project_id
+            return data
+
+        def _apply_project_patch_to_form(self, patch: dict[str, Any]) -> None:
+            for key, value in (patch or {}).items():
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                if key in self.project_fields:
+                    self._set_text(self.project_fields[key], text)
+                elif key in self.project_texts:
+                    self._set_text(self.project_texts[key], text)
+
         def _update_project_tag_summary(self) -> None:
             if not hasattr(self, "project_tag_summary"):
                 return
@@ -1936,53 +2226,8 @@ if PYSIDE6_AVAILABLE:
             self.project_tag_summary.setText(f"{tags_text}；对白引号：{quote['label']}")
 
         def edit_project_tags_dialog(self) -> None:
-            dialog = QDialog(self.window)
-            dialog.setWindowTitle("选择标签与引号")
-            layout = QVBoxLayout(dialog)
-            catalog = list_style_tag_catalog()
-            labels = {
-                "selected_genre_tags": "题材标签",
-                "selected_setting_tags": "设定标签",
-                "selected_structure_tags": "结构标签",
-                "selected_style_tags": "风格标签",
-            }
-            checks: dict[str, dict[str, QCheckBox]] = {}
-            current_selection = getattr(self, "project_tag_selection", {})
-            for field, category in FIELD_TO_CATEGORY.items():
-                layout.addWidget(QLabel(labels.get(field, field)))
-                row = QHBoxLayout()
-                checks[field] = {}
-                selected = set(current_selection.get(field, []))
-                for tag in catalog.get(category, []):
-                    tag_id = str(tag.get("id", ""))
-                    checkbox = QCheckBox(str(tag.get("label", tag_id)))
-                    checkbox.setToolTip(str(tag.get("usage_rule", "") or tag.get("style_rule", "")))
-                    checkbox.setChecked(tag_id in selected)
-                    checks[field][tag_id] = checkbox
-                    row.addWidget(checkbox)
-                row.addStretch(1)
-                layout.addLayout(row)
-            layout.addWidget(QLabel("对白引号"))
-            quote_combo = QComboBox()
-            for quote_id, item in DIALOGUE_QUOTE_STYLES.items():
-                quote_combo.addItem(str(item["label"]), quote_id)
-            quote_index = quote_combo.findData(getattr(self, "dialogue_quote_style_value", "cn_quotes"))
-            quote_combo.setCurrentIndex(quote_index if quote_index >= 0 else 0)
-            layout.addWidget(quote_combo)
-            buttons = QDialogButtonBox(
-                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-            )
-            buttons.accepted.connect(dialog.accept)
-            buttons.rejected.connect(dialog.reject)
-            layout.addWidget(buttons)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            self.project_tag_selection = {
-                field: [tag_id for tag_id, checkbox in field_checks.items() if checkbox.isChecked()]
-                for field, field_checks in checks.items()
-            }
-            self.dialogue_quote_style_value = str(quote_combo.currentData() or "cn_quotes")
-            self._update_project_tag_summary()
+            dialog = ProjectTagAssistDialog(self)
+            dialog.exec()
 
         def open_search_project_creation_dialog(self) -> None:
             dialog = SearchProjectCreationDialog(self)
@@ -2360,9 +2605,8 @@ if PYSIDE6_AVAILABLE:
             self._ok("角色卡基础信息已更新，点击保存资料后落盘")
 
         def save_project(self) -> None:
-            data = {key: self._text(widget) for key, widget in self.project_fields.items()}
-            data.update({key: self._text(widget) for key, widget in self.project_texts.items()})
-            data.update(self._project_tag_data())
+            data = self._current_project_form_data()
+            data.pop("id", None)
             if getattr(self, "pending_generation_profile_json", ""):
                 data["generation_profile_json"] = self.pending_generation_profile_json
             if not data["title"]:
@@ -3251,6 +3495,20 @@ if PYSIDE6_AVAILABLE:
                 return self.pipeline.generate_tagged_character_streaming(project_id, profile, on_delta)
             result = self.pipeline.generate_tagged_character(project_id, profile)
             preview = json.dumps(result.get("world_item", result), ensure_ascii=False, indent=2)
+            on_delta(preview)
+            return result
+
+        def _run_streaming_project_assist(self, profile: dict[str, Any]) -> dict[str, Any]:
+            self.bridge.stream.emit("project_assist", "")
+
+            def on_delta(delta: str) -> None:
+                if delta:
+                    self.bridge.stream.emit("project_assist", delta)
+
+            if hasattr(self.pipeline, "assist_project_edit_streaming"):
+                return self.pipeline.assist_project_edit_streaming(profile, on_delta)
+            result = self.pipeline.assist_project_edit(profile)
+            preview = json.dumps(result, ensure_ascii=False, indent=2)
             on_delta(preview)
             return result
 

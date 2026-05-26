@@ -144,6 +144,17 @@ class FakeLLM:
                     }
                 ]
             }
+        if agent_name == "project_assistant":
+            return {
+                "project_patch": {
+                    "style": "节奏明快，保留日式轻小说吐槽感。",
+                    "pov": "第三人称有限视角",
+                    "world_summary": "魔法学院与钟楼记录制度共同构成世界核心。",
+                    "global_concept": "",
+                },
+                "reasoning_summary": "根据标签强化风格和视角。",
+                "warnings": ["总体概括未改动"],
+            }
         if agent_name == "chapter_memory_writer":
             return {
                 "world_items": [
@@ -251,6 +262,22 @@ class TaggedCharacterStreamingFakeLLM(FakeLLM):
             '"summary":"流式标签化角色卡。","details":{"identity":"魔法学院转学生",',
             '"personality":"克制但不服输","motivation":"查清钟塔记录错误","speech_style":"短句",',
             '"role_flags":{"supporting":true},"modules":{}},"tags":"AI生成","status":"candidate"}',
+        ]
+        for chunk in chunks:
+            on_delta(chunk)
+        return "".join(chunks)
+
+
+class ProjectAssistantStreamingFakeLLM(FakeLLM):
+    config = {"chat_model": "project-assist-model", "review_model": "review-model"}
+
+    def stream_text(self, model, messages, on_delta):
+        self.stream_model = model
+        self.stream_messages = messages
+        chunks = [
+            '{"project_patch":{"style":"流式轻小说风格",',
+            '"pov":"第三人称有限视角","world_summary":"流式世界观"},',
+            '"reasoning_summary":"按标签辅助修改","warnings":["需要用户保存项目"]}',
         ]
         for chunk in chunks:
             on_delta(chunk)
@@ -399,6 +426,58 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("排除项", draft["writing_style_guide"])
         self.assertIn("公共石碑", draft["global_concept"])
         self.assertNotIn("西式幻想世界", draft["global_concept"])
+
+    def test_assist_project_edit_returns_patch_without_saving(self) -> None:
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        profile = {
+            "project_id": self.project_id,
+            "project": {
+                "id": self.project_id,
+                "title": "钟塔学院",
+                "style": "轻小说",
+                "world_summary": "学院",
+            },
+            "selected_tags": {
+                "selected_setting_tags": ["magic_academy"],
+                "selected_style_tags": ["jp_light_novel"],
+            },
+            "dialogue_quote_style": "corner_quotes",
+            "direction": "强化日式轻小说感",
+        }
+
+        result = pipeline.assist_project_edit(profile)
+
+        self.assertEqual(result["project_patch"]["style"], "节奏明快，保留日式轻小说吐槽感。")
+        self.assertNotIn("title", result["project_patch"])
+        self.assertEqual(result["warnings"], ["总体概括未改动"])
+        self.assertEqual(llm.calls[0]["agent_name"], "project_assistant")
+        self.assertIn("project_patch", llm.calls[0]["schema_hint"])
+        user_content = llm.calls[0]["messages"][-1]["content"]
+        payload = json.loads(user_content.split("\n", 1)[1])
+        self.assertEqual(payload["project"]["title"], "钟塔学院")
+        self.assertEqual(payload["dialogue_quote_style"], "corner_quotes")
+        self.assertTrue(any(tag["id"] == "magic_academy" for tag in payload["selected_tag_definitions"]))
+
+    def test_assist_project_edit_streaming_reports_chunks_and_parses_patch(self) -> None:
+        llm = ProjectAssistantStreamingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        chunks: list[str] = []
+
+        result = pipeline.assist_project_edit_streaming(
+            {
+                "project_id": self.project_id,
+                "project": {"id": self.project_id, "title": "钟塔学院"},
+                "selected_tags": {"selected_style_tags": ["jp_light_novel"]},
+                "direction": "统一风格",
+            },
+            chunks.append,
+        )
+
+        self.assertEqual(result["project_patch"]["style"], "流式轻小说风格")
+        self.assertEqual(llm.stream_model, "project-assist-model")
+        self.assertIn("流式轻小说风格", "".join(chunks))
+        self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
 
     def test_outline_split_draft_review_rewrite_flow(self) -> None:
         outline = self.pipeline.expand_global_concept(self.project_id)

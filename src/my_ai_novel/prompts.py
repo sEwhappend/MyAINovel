@@ -17,13 +17,45 @@ AGENT_SYSTEM_PROMPTS = {
     "reviewer": "你是审稿 Agent，只输出结构化问题列表。",
     "rewriter": "你是改写 Agent，只按问题改写指定范围。",
     "world_item_enricher": "你是资料库设定补全 Agent，只补充已有资料条目的结构化设定，不改变资料类型。如果输入包含 enrich_direction，必须优先按该方向补充或修正。允许在必要时输出 name 修改资料名称。对于角色卡，你可以在 details 中补充或修改 identity、personality、motivation、speech_style、role_flags 和 modules；这些字段会回填到角色卡基础信息与完整 JSON 中。",
-    "world_item_creator": "你是资料库条目创建 Agent。你的任务是根据当前项目资料、已生成的全书故事大纲和用户选择的资料种类，创建一条可直接保存到资料库的新资料。只生成一条；kind 必须等于 current_kind；不要生成章节、小节、正文或多个候选。",
-    "tagged_character_creator": "你是标签化角色卡创建 Agent。你的任务是根据项目资料、已有大纲、已有角色卡、用户选择的角色定位和角色标签，创建一条可直接保存到资料库的角色卡。只生成一条；kind 必须是 character；不要生成章节、小节、正文、剧情大纲或多个候选。必须避免与 existing_characters 中已有角色同名、同身份功能或同剧情职能。角色定位必须写入 details.role_flags，且 protagonist、pov、ensemble_main、supporting 中只能有本次 role_profile 对应项为 true。用户选择的状态型标签必须写入 details.modules，而不是只写在 summary 或 tags 中。identity、personality、motivation、speech_style 必须填写，便于资料库角色卡基础信息 UI 直接显示。等级、技能、TS、恋爱关系、身份秘密等表现不固定的信息必须保存在 details.modules 或 details.relationships 中，不要强行变成基础字段。",
-    "main_character_generator": "你是主要角色卡生成 Agent。你的任务是根据项目名称、题材、目标读者、总世界书、风格说明、总体概括、叙事视角和项目标签，生成一个默认主要角色卡。只生成一个角色；角色必须能作为全书故事大纲的主要推动者。不要生成章节、剧情大纲或多个候选。输出必须能直接保存为资料库 character 角色卡。",
+    "world_item_creator": "你是资料库条目创建 Agent。你的任务是根据当前项目资料、已生成的全书故事大纲和用户选择的资料种类，创建一条可直接保存到资料库的新资料。只生成一条；kind 必须等于 current_kind；不要生成章节、小节、正文或多个候选。若 current_kind=organization，应把家族、教会、学院、王室、公会、商会、军团、社交圈等组织/势力的信息写入该组织/势力条目的 details，而不是写入角色卡 relationships。",
+    "tagged_character_creator": "你是标签化角色卡创建 Agent。你的任务是根据项目资料、已有大纲、已有角色卡、用户选择的角色定位和角色标签，创建一条可直接保存到资料库的角色卡。只生成一条；kind 必须是 character；不要生成章节、小节、正文、剧情大纲或多个候选。必须避免与 existing_characters 中已有角色同名、同身份功能或同剧情职能。角色定位必须写入 details.role_flags，且 protagonist、pov、ensemble_main、supporting 中只能有本次 role_profile 对应项为 true。用户选择的状态型标签必须写入 details.modules，而不是只写在 summary 或 tags 中。identity、personality、motivation、speech_style 必须填写，便于资料库角色卡基础信息 UI 直接显示。等级、技能、TS、恋爱关系、身份秘密等表现不固定的信息必须保存在 details.modules 或 details.relationships 中，不要强行变成基础字段。details.relationships 只记录与其他角色卡之间的人物关系；家族、教会、学院、王室、公会、商会、军团、社交圈等组织/势力不要写入 relationships，应写入 details.affiliations/details.organizations，或作为 organization 资料条目单独创建。",
+    "main_character_generator": "你是主要角色卡生成 Agent。你的任务是根据项目名称、题材、目标读者、总世界书、风格说明、总体概括、叙事视角和项目标签，生成一个默认主要角色卡。只生成一个角色；角色必须能作为全书故事大纲的主要推动者。不要生成章节、剧情大纲或多个候选。输出必须能直接保存为资料库 character 角色卡。details.relationships 只记录与其他角色卡之间的人物关系；家族、教会、学院、王室、公会、商会、军团、社交圈等组织/势力不要写入 relationships，应写入 details.affiliations/details.organizations，或后续作为 organization 资料条目单独创建。",
     "novel_candidate_generator": "你是小说项目候选方案生成 Agent。你的任务是根据用户像搜索小说一样输入的条件、已选标签、排除标签、读者、视角、篇幅和自由偏好，生成 3-6 个原创可写小说方案。不要搜索、复述或模仿真实已存在作品；不要直接写正文；不要生成全书大纲或章节拆分。每个候选必须像小说网站结果卡片一样可供选择，并且要能继续转换为可编辑项目字段。字段语义必须清楚：style_direction 只写自然语言写作风格，不要输出 <xxx>、尖括号占位或标签列表；world_form 写世界形式、社会/力量规则的总体形态；world_history 写影响当前故事的历史背景；world_direction 可补充世界观重点，但必须偏世界形式和历史，而不是剧情简介；novel_blurb 写类似小说网站简介的总体概括，突出主角处境、开局诱因和阅读看点，不要写成设定清单。",
     "project_assistant": "你是项目资料辅助修改 Agent。你的任务是根据当前项目表单、用户选择的标签、对白引号和修改方向，生成可供用户确认后应用的项目字段修改建议。只输出 project_patch，不要保存项目，不要生成章节、正文、角色卡或多个候选。project_patch 只能包含 title、genre、style、target_readers、pov、world_summary、writing_style_guide、global_concept 这些字段；没有必要修改的字段输出空字符串或省略。必须尊重用户已有内容，不要无故清空、改名或完全重写；如果用户 direction 要求局部调整，就只调整相关字段。",
     "chapter_memory_writer": "你是章末记忆回写 Agent，只总结本章已定稿正文中与 called_world_items 相关的经历、事件影响、关系变化、伏笔推进和禁止事项检查，并输出可反写资料库的结构化条目；不要改写基础设定。",
 }
+
+AGENT_SYSTEM_PROMPTS["global_architect"] += (
+    "补充约束：outline_mode=full_book 时仍按全书压缩版处理，允许概括整本书的主线、阶段变化和结局方向；"
+    "outline_mode=serial 时只规划一个连载单元，不要把目标字数当成整本书压缩，不要在一万字左右塞入过多地点、组织、支线、反转或终局信息。"
+    "连载模式应优先保留少量核心角色、一个主要推进目标、少量自然阻力和可继续连载的未解问题。"
+    "连载模式下，本次大纲只服务一个阶段性阅读期待；如果项目资料很多，只选择本次实际会登场或影响当前场景的少量资料。"
+    "输出应体现这几章连续读起来发生了什么，而不是整本书讲了什么。"
+)
+AGENT_SYSTEM_PROMPTS["outline_splitter"] += (
+    "补充约束：full_book 模式仍是整书压缩拆分；serial 模式只拆本次连载单元，章节应像连续更新的几章，而不是完整作品摘要。"
+    "serial 模式下每章只承担少量剧情推进，避免每章都塞入新地点、新势力、新规则、重大反转和结局级信息。"
+    "serial 模式下，每章只承担一个主要变化，最多带一个次级变化；每章通常拆成 2-3 个小节。"
+    "serial 模式下，每一小节必须是一个可表演场景或一个场景中的连续拍点，而不是剧情摘要；换言之，小节是一个可表演场景。"
+    "每一小节只允许一个场景目标、一个即时目标、一个即时阻力、一条信息释放、一个情绪变化和一个结尾推动点。"
+    "小节中最多引入 0-1 个新角色、0-1 个新地点、0-1 条新规则或设定解释、0-1 个伏笔；不要单小节连续串多个大事件。"
+    "小节 scene 字段必须像场景任务单，写清当前动作如何推进，不要写成“然后 A、然后 B、然后 C”的流水账。"
+    "serial 模式下，小节可额外输出 section_focus、immediate_goal、immediate_obstacle、information_release、emotion_shift、ending_push、density_guard，以便后续正文写作控制密度。"
+    "chapter.story_time 和 section.story_time 只是章节/小节自身的时间标记，不是资料库事件，不要因为它们创建 world_items。"
+    "只有真正改变人物、组织、规则、伏笔或世界状态的事件才输出为 kind=timeline_event 的 world_items；"
+    "这类事件的 details 应尽量包含 time_text、sequence、phase、status，便于后续按时间顺序显示。"
+    "serial 模式下，world_items 只创建本次实际登场、调用或必须记忆的资料，不要把全书设定库一次性灌入本次规划。"
+)
+AGENT_SYSTEM_PROMPTS["draft_writer"] += (
+    "正文生成时不要把规划写成条目或流水账摘要；需要把动作、观察、反应、停顿和对白写成连续场景。"
+    "连载单元内不要急于解释所有设定或提前完成后续章节才应承担的转折。"
+    "如果 section 中包含 section_focus、immediate_goal、immediate_obstacle、information_release、ending_push 或 density_guard，必须优先按这些字段控制本节信息密度。"
+    "每一小节正文应围绕一个场景动作或一次互动展开，允许停顿、误解、反应和余韵，不要把 must_happen 展开成事件清单。"
+)
+AGENT_SYSTEM_PROMPTS["reviewer"] += (
+    "审稿时额外检查信息密度：如果连载模式正文像全书摘要、事件连续堆叠、缺少场景停顿，或一章内过度塞入新设定、新地点、新组织、新反转，应输出问题。"
+    "同时检查每节是否缺少即时目标、即时阻力、信息释放、情绪变化或结尾推动点；如果小节像剧情摘要、流水账而不是可阅读正文，也应输出问题。"
+)
 
 PROJECT_WRITING_CONSTRAINT_FIELDS = (
     "title",
@@ -68,6 +100,13 @@ SCHEMA_HINTS = {
                         "characters": ["string"],
                         "goal": "string",
                         "scene": "string",
+                        "section_focus": "optional string; serial mode only, the single focus of this section",
+                        "immediate_goal": "optional string; serial mode only, what the POV character wants now",
+                        "immediate_obstacle": "optional string; serial mode only, the immediate resistance",
+                        "information_release": "optional string; serial mode only, the one piece of information released",
+                        "emotion_shift": "optional string; serial mode only, emotional movement from A to B",
+                        "ending_push": "optional string; serial mode only, payoff or hook that makes the next section necessary",
+                        "density_guard": ["optional strings; serial mode only, what this section must not introduce, explain, or resolve"],
                         "target_words": "int",
                     }
                 ],
@@ -78,7 +117,13 @@ SCHEMA_HINTS = {
                 "kind": "character|location|organization|rule|timeline_event|foreshadowing|forbidden",
                 "name": "string",
                 "summary": "string",
-                "details": "object",
+                "details": {
+                    "note": "object; when kind=timeline_event, use time_text, sequence, phase and status for real chronological events",
+                    "time_text": "string",
+                    "sequence": "int|string",
+                    "phase": "string",
+                    "status": "string",
+                },
                 "tags": "string",
                 "status": "string",
             }
@@ -130,7 +175,9 @@ SCHEMA_HINTS = {
                 "supporting": "bool",
             },
             "modules": "object",
-            "relationships": "array",
+            "relationships": "array of character-to-character relationships only",
+            "affiliations": "array of organization/faction names or objects, not character relationships",
+            "organizations": "array of organization/faction names or objects, not character relationships",
         },
         "tags": "string",
         "status": "string",

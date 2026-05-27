@@ -19,12 +19,13 @@ WORLD_KIND_LABELS = {
     "location": "地点设定",
     "organization": "组织/势力",
     "rule": "规则设定",
-    "timeline_event": "时间线",
+    "timeline_event": "事件",
     "foreshadowing": "伏笔",
     "forbidden": "禁止事项",
 }
 WORLD_LABEL_TO_KIND = {label: kind for kind, label in WORLD_KIND_LABELS.items()}
 WORLD_LABEL_TO_KIND["人物设定"] = "character"
+WORLD_LABEL_TO_KIND["时间线"] = "timeline_event"
 
 LLM_CONFIG_FIELDS = [
     ("Base URL", "base_url"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 import os
 import threading
 from typing import Any, Callable
@@ -12,6 +13,7 @@ from .llm import LLMClient, load_llm_config, save_llm_config
 from .models import WORLD_ITEM_KINDS
 from .pipeline import NovelPipeline
 from .project_files import ensure_project_structure
+from .relation_graph import build_character_graph, build_event_graph
 from .retrieval import retrieve_context
 from .style_tags import (
     DIALOGUE_QUOTE_STYLES,
@@ -46,7 +48,7 @@ from .world_modules import (
 
 try:
     from PySide6.QtCore import QEvent, QRect, QObject, QSize, Qt, Signal
-    from PySide6.QtGui import QColor, QCursor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
+    from PySide6.QtGui import QColor, QBrush, QCursor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -55,6 +57,13 @@ try:
         QDialogButtonBox,
         QFormLayout,
         QFrame,
+        QGraphicsEllipseItem,
+        QGraphicsItem,
+        QGraphicsLineItem,
+        QGraphicsRectItem,
+        QGraphicsScene,
+        QGraphicsTextItem,
+        QGraphicsView,
         QHBoxLayout,
         QLabel,
         QLineEdit,
@@ -407,6 +416,184 @@ if PYSIDE6_AVAILABLE:
         success = Signal(str, object, object)
         error = Signal(str)
         stream = Signal(str, str)
+
+
+    class RelationGraphView(QGraphicsView):
+        def __init__(self, on_select: Callable[[dict[str, Any], str], None], on_open: Callable[[dict[str, Any]], None]) -> None:
+            super().__init__()
+            self._scene = QGraphicsScene(self)
+            self.setScene(self._scene)
+            self.on_select = on_select
+            self.on_open = on_open
+            self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+            self.setObjectName("RelationGraphView")
+            self.graph: dict[str, Any] = {"nodes": [], "edges": [], "warnings": []}
+
+        def render_graph(self, graph: dict[str, Any], mode: str, query: str = "") -> None:
+            self.graph = graph
+            self._scene.clear()
+            nodes = list(graph.get("nodes", []))
+            edges = list(graph.get("edges", []))
+            query = query.strip().lower()
+            if query:
+                nodes = [
+                    node
+                    for node in nodes
+                    if query in str(node.get("label") or node.get("name") or "").lower()
+                    or query in str(node.get("summary", "")).lower()
+                ]
+                node_ids = {str(node.get("id")) for node in nodes}
+                edges = [
+                    edge
+                    for edge in edges
+                    if str(edge.get("source")) in node_ids and str(edge.get("target")) in node_ids
+                ]
+            if not nodes:
+                self._scene.addText("暂无可显示的关系数据")
+                return
+
+            positions = self._layout_positions(nodes, mode)
+            for edge in edges:
+                source_pos = positions.get(str(edge.get("source")))
+                target_pos = positions.get(str(edge.get("target")))
+                if not source_pos or not target_pos:
+                    continue
+                line = QGraphicsLineItem(source_pos[0], source_pos[1], target_pos[0], target_pos[1])
+                pen = QPen(self._edge_color(str(edge.get("kind", ""))), max(1, int(edge.get("weight", 1))))
+                if str(edge.get("confidence")) != "explicit":
+                    pen.setStyle(Qt.PenStyle.DashLine)
+                line.setPen(pen)
+                line.setZValue(0)
+                line.setData(0, edge)
+                line.setData(1, "edge")
+                self._scene.addItem(line)
+
+            for node in nodes:
+                x, y = positions[str(node.get("id"))]
+                width = 132
+                height = 48
+                if str(node.get("kind")) == "character":
+                    item = QGraphicsEllipseItem(x - 42, y - 42, 84, 84)
+                else:
+                    item = QGraphicsRectItem(x - width / 2, y - height / 2, width, height)
+                item.setBrush(QBrush(self._node_color(str(node.get("kind", "")), str(node.get("source", "")))))
+                item.setPen(self._node_pen(str(node.get("kind", "")), str(node.get("source", ""))))
+                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+                item.setZValue(2)
+                item.setData(0, node)
+                item.setData(1, "node")
+                self._scene.addItem(item)
+
+                label = QGraphicsTextItem(str(node.get("label") or node.get("name") or "未命名"))
+                label.setDefaultTextColor(QColor("#243042"))
+                label.setTextWidth(width)
+                label_rect = label.boundingRect()
+                label.setPos(x - width / 2, y - label_rect.height() / 2)
+                label.setZValue(3)
+                label.setData(0, node)
+                label.setData(1, "node")
+                self._scene.addItem(label)
+            self.fit_graph()
+
+        def fit_graph(self) -> None:
+            rect = self._scene.itemsBoundingRect()
+            if rect.isValid() and not rect.isEmpty():
+                self.fitInView(rect.adjusted(-80, -80, 80, 80), Qt.AspectRatioMode.KeepAspectRatio)
+
+        def wheelEvent(self, event) -> None:  # type: ignore[override]
+            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            self.scale(factor, factor)
+
+        def mousePressEvent(self, event) -> None:  # type: ignore[override]
+            item = self._graph_item_at(event)
+            if item is not None:
+                payload = item.data(0)
+                payload_type = item.data(1)
+                if isinstance(payload, dict):
+                    self.on_select(payload, str(payload_type))
+            super().mousePressEvent(event)
+
+        def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+            item = self._graph_item_at(event)
+            if item is not None and item.data(1) == "node":
+                payload = item.data(0)
+                if isinstance(payload, dict):
+                    self.on_open(payload)
+            super().mouseDoubleClickEvent(event)
+
+        def _graph_item_at(self, event) -> QGraphicsItem | None:
+            try:
+                position = event.position().toPoint()
+            except AttributeError:
+                position = event.pos()
+            item = self.itemAt(position)
+            while item is not None and item.data(1) not in {"node", "edge"}:
+                item = item.parentItem()
+            return item
+
+        def _layout_positions(self, nodes: list[dict[str, Any]], mode: str) -> dict[str, tuple[float, float]]:
+            if mode == "event":
+                return {
+                    str(node.get("id")): ((index % 4) * 250.0, (index // 4) * 150.0)
+                    for index, node in enumerate(nodes)
+                }
+            radius = max(160.0, len(nodes) * 32.0)
+            positions: dict[str, tuple[float, float]] = {}
+            for index, node in enumerate(nodes):
+                angle = (math.tau * index / max(1, len(nodes))) - math.pi / 2
+                positions[str(node.get("id"))] = (math.cos(angle) * radius, math.sin(angle) * radius)
+            return positions
+
+        def _node_color(self, kind: str, source: str = "") -> QColor:
+            if source == "missing_reference":
+                return QColor("#fff0f2")
+            if source == "inferred":
+                return QColor("#f5f8fc")
+            colors = {
+                "character": "#cfe7ff",
+                "timeline_event": "#fff2bd",
+                "foreshadowing": "#f3d4ff",
+                "location": "#d7f3df",
+                "organization": "#e4d8ff",
+                "rule": "#e9eef7",
+                "forbidden": "#ffd9e0",
+                "chapter": "#eef6ff",
+                "section": "#f8fbff",
+            }
+            return QColor(colors.get(kind, "#ffffff"))
+
+        def _node_pen(self, kind: str, source: str = "") -> QPen:
+            border_colors = {
+                "character": "#2f80d9",
+                "timeline_event": "#d59b13",
+                "foreshadowing": "#9b59c7",
+                "location": "#2d9a55",
+                "organization": "#7b61d9",
+                "rule": "#6b7a90",
+                "forbidden": "#d84c5f",
+                "chapter": "#6fa8ff",
+                "section": "#9aa8ba",
+            }
+            if source == "missing_reference":
+                pen = QPen(QColor("#d84c5f"), 2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                return pen
+            if source == "inferred":
+                pen = QPen(QColor("#9aa8ba"), 2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                return pen
+            return QPen(QColor(border_colors.get(kind, "#6fa8ff")), 2)
+
+        def _edge_color(self, kind: str) -> QColor:
+            if kind in {"conflict", "forbidden_constraint"}:
+                return QColor("#e56b73")
+            if kind in {"ally", "same_scene", "involves", "mentions_character"}:
+                return QColor("#6fa8ff")
+            if kind in {"causes", "caused_by", "before", "after"}:
+                return QColor("#9b7ede")
+            return QColor("#9aa8ba")
 
 
     class ProjectShelfListWidget(QListWidget):
@@ -1734,6 +1921,7 @@ if PYSIDE6_AVAILABLE:
             self._build_project_page()
             self._build_outline_page()
             self._build_world_page()
+            self._build_relation_graph_page()
             self._build_structure_page()
             self._build_writing_page()
             self._build_settings_page()
@@ -1950,6 +2138,69 @@ if PYSIDE6_AVAILABLE:
             splitter.setStretchFactor(1, 2)
             splitter.setSizes([320, 680])
             self._sync_world_character_form_visibility()
+
+        def _build_relation_graph_page(self) -> None:
+            page = self._add_page("关系图")
+            self.relation_graph_page = page
+            layout = QVBoxLayout(page)
+
+            toolbar = QHBoxLayout()
+            self.relation_graph_mode = QComboBox()
+            self.relation_graph_mode.addItems(["人物关系", "事件关系"])
+            self.relation_graph_mode.currentTextChanged.connect(lambda _text: self.refresh_relation_graph())
+            toolbar.addWidget(QLabel("图谱类型"))
+            toolbar.addWidget(self.relation_graph_mode)
+            self.relation_graph_search = QLineEdit()
+            self.relation_graph_search.setPlaceholderText("搜索人物、事件或摘要")
+            self.relation_graph_search.textChanged.connect(lambda _text: self.refresh_relation_graph())
+            toolbar.addWidget(self.relation_graph_search, 1)
+            self.relation_graph_inferred = QCheckBox("显示弱推断关系")
+            self.relation_graph_inferred.setChecked(True)
+            self.relation_graph_inferred.stateChanged.connect(lambda _state: self.refresh_relation_graph())
+            toolbar.addWidget(self.relation_graph_inferred)
+            toolbar.addWidget(self._button("刷新图谱", self.refresh_relation_graph))
+            toolbar.addWidget(self._button("适配窗口", self.fit_relation_graph))
+            layout.addLayout(toolbar)
+
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            left_panel = QFrame()
+            left_panel.setObjectName("ProjectShelfPane")
+            left = QVBoxLayout(left_panel)
+            title = QLabel("筛选说明")
+            title.setObjectName("PanelTitle")
+            left.addWidget(title)
+            self.relation_graph_hint = QTextEdit()
+            self.relation_graph_hint.setReadOnly(True)
+            self.relation_graph_hint.setPlainText(
+                "人物关系读取角色卡 JSON 的 relationships，并可从章节/小节共同出现推断弱关系。\n\n"
+                "事件关系读取事件、伏笔、地点、组织、规则、章节和小节信息。第一版只读，不会写回资料库。"
+            )
+            left.addWidget(self.relation_graph_hint, 1)
+            splitter.addWidget(left_panel)
+
+            self.relation_graph_view = RelationGraphView(self._on_relation_graph_selected, self._open_world_item_from_graph)
+            splitter.addWidget(self.relation_graph_view)
+
+            right_panel = QFrame()
+            right_panel.setObjectName("ProjectDetailPane")
+            right = QVBoxLayout(right_panel)
+            detail_title = QLabel("详情")
+            detail_title.setObjectName("PanelTitle")
+            right.addWidget(detail_title)
+            self.relation_graph_detail = QTextEdit()
+            self.relation_graph_detail.setReadOnly(True)
+            right.addWidget(self.relation_graph_detail, 1)
+            right.addWidget(self._button("在资料库中打开", self.open_selected_relation_graph_item))
+            self.save_relation_graph_item_button = self._button("保存为资料库条目", self.save_selected_relation_graph_item)
+            self.save_relation_graph_item_button.setEnabled(False)
+            right.addWidget(self.save_relation_graph_item_button)
+            splitter.addWidget(right_panel)
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 4)
+            splitter.setStretchFactor(2, 2)
+            splitter.setSizes([220, 640, 300])
+            layout.addWidget(splitter, 1)
+            self.current_relation_graph_item: dict[str, Any] | None = None
 
         def _build_structure_page(self) -> None:
             page = self._add_page("章节")
@@ -2382,6 +2633,188 @@ if PYSIDE6_AVAILABLE:
                 return None
             return rows[row]
 
+        def _relation_graph_mode_key(self) -> str:
+            return "event" if self.relation_graph_mode.currentText() == "事件关系" else "character"
+
+        def _relation_graph_source_data(
+            self,
+        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+            if not self.current_project_id:
+                return [], [], {}
+            world_items = self.store.list_world_items(self.current_project_id)
+            chapters = self.store.list_chapters(self.current_project_id)
+            sections_by_chapter = {
+                int(chapter.get("id", 0)): self.store.list_sections(int(chapter.get("id", 0)))
+                for chapter in chapters
+            }
+            return world_items, chapters, sections_by_chapter
+
+        def refresh_relation_graph(self) -> None:
+            if not hasattr(self, "relation_graph_view"):
+                return
+            self.current_relation_graph_item = None
+            if not self.current_project_id:
+                graph = {"nodes": [], "edges": [], "warnings": ["请先选择项目"]}
+                self.relation_graph_view.render_graph(graph, "character")
+                self.relation_graph_detail.setPlainText("请先选择项目")
+                self.save_relation_graph_item_button.setEnabled(False)
+                return
+            world_items, chapters, sections_by_chapter = self._relation_graph_source_data()
+            include_inferred = self.relation_graph_inferred.isChecked()
+            mode = self._relation_graph_mode_key()
+            if mode == "event":
+                graph = build_event_graph(world_items, chapters, sections_by_chapter, include_inferred)
+            else:
+                graph = build_character_graph(world_items, chapters, sections_by_chapter, include_inferred)
+            graph = self._filter_relation_graph_for_mode(graph, mode)
+            self.relation_graph_view.render_graph(graph, mode, self.relation_graph_search.text())
+            node_count = len(graph.get("nodes", []))
+            edge_count = len(graph.get("edges", []))
+            warnings = graph.get("warnings", [])
+            lines = [f"节点：{node_count}", f"关系：{edge_count}"]
+            if warnings:
+                lines.append("")
+                lines.append("提示")
+                lines.extend(f"- {warning}" for warning in warnings[:12])
+            self.relation_graph_detail.setPlainText("\n".join(lines))
+            self.save_relation_graph_item_button.setEnabled(False)
+
+        def fit_relation_graph(self) -> None:
+            if hasattr(self, "relation_graph_view"):
+                self.relation_graph_view.fit_graph()
+
+        def _on_relation_graph_selected(self, payload: dict[str, Any], payload_type: str) -> None:
+            self.current_relation_graph_item = payload if payload_type == "node" else None
+            title = "节点详情" if payload_type == "node" else "关系详情"
+            lines = [title, ""]
+            if payload_type == "node":
+                message = self._relation_graph_node_message(payload)
+                if message:
+                    lines.extend([message, ""])
+            for key in ["label", "name", "kind", "summary", "status", "source", "confidence", "evidence"]:
+                if key in payload and payload.get(key) not in (None, "", []):
+                    value = payload.get(key)
+                    if key == "kind":
+                        value = self._relation_graph_kind_label(str(value))
+                    if isinstance(value, list):
+                        value = "、".join(str(item) for item in value)
+                    lines.append(f"{key}: {value}")
+            if payload_type == "node":
+                lines.append("")
+                lines.append("双击节点或点击下方按钮，可在资料库中打开对应条目。")
+            self.relation_graph_detail.setPlainText("\n".join(lines))
+            self.save_relation_graph_item_button.setEnabled(self._relation_graph_node_can_be_saved(payload))
+
+        def open_selected_relation_graph_item(self) -> None:
+            if not self.current_relation_graph_item:
+                self._error("请先选择一个资料库节点")
+                return
+            self._open_world_item_from_graph(self.current_relation_graph_item)
+
+        def _open_world_item_from_graph(self, node: dict[str, Any]) -> None:
+            try:
+                source_id = int(node.get("source_id") or 0)
+            except (TypeError, ValueError):
+                source_id = 0
+            kind = str(node.get("kind") or "")
+            if not source_id or kind not in WORLD_ITEM_KINDS:
+                self._error(self._relation_graph_node_message(node) or "当前节点不是可打开的资料库条目")
+                return
+            self.stack.setCurrentWidget(self.world_page)
+            index = self.stack.indexOf(self.world_page)
+            if index >= 0:
+                self.navigation.setCurrentRow(index)
+            self._set_world_kind_safely(kind)
+            self.refresh_world_items()
+            for row, item in enumerate(self.world_rows):
+                if int(item.get("id", 0)) == source_id:
+                    self.world_list.setCurrentRow(row)
+                    self.world_list.scrollToItem(self.world_list.item(row))
+                    return
+            self._error("资料库中未找到该条目")
+
+        def _relation_graph_node_can_be_saved(self, node: dict[str, Any]) -> bool:
+            return (
+                str(node.get("source", "")) in {"inferred", "missing_reference"}
+                and str(node.get("kind", "")) in self._relation_graph_allowed_save_kinds()
+            )
+
+        def _relation_graph_allowed_save_kinds(self) -> set[str]:
+            if self._relation_graph_mode_key() == "character":
+                return {"character", "organization"}
+            return set(WORLD_ITEM_KINDS)
+
+        def _filter_relation_graph_for_mode(self, graph: dict[str, Any], mode: str) -> dict[str, Any]:
+            if mode != "character":
+                return graph
+            allowed = {"character", "organization"}
+            nodes = [node for node in graph.get("nodes", []) if str(node.get("kind", "")) in allowed]
+            node_ids = {str(node.get("id", "")) for node in nodes}
+            edges = [
+                edge
+                for edge in graph.get("edges", [])
+                if str(edge.get("source", "")) in node_ids and str(edge.get("target", "")) in node_ids
+            ]
+            return {"nodes": nodes, "edges": edges, "warnings": graph.get("warnings", [])}
+
+        def _relation_graph_kind_label(self, kind: str) -> str:
+            if kind == "chapter":
+                return "章节"
+            if kind == "section":
+                return "小节"
+            return world_kind_label(kind)
+
+        def _relation_graph_node_message(self, node: dict[str, Any]) -> str:
+            source = str(node.get("source", ""))
+            kind = str(node.get("kind", ""))
+            if source == "inferred":
+                return "这是推断节点，尚未写入资料库"
+            if source == "missing_reference":
+                return "这是缺失引用节点，资料库中尚无对应条目"
+            if kind in {"chapter", "section"}:
+                return "这是章节/小节结构节点，不是资料库条目"
+            if kind not in WORLD_ITEM_KINDS:
+                return "当前节点不是可打开的资料库条目"
+            if not node.get("source_id"):
+                return "当前节点缺少资料库条目 ID"
+            return ""
+
+        def save_selected_relation_graph_item(self) -> None:
+            project_id = self._project_required()
+            node = self.current_relation_graph_item
+            if not project_id or not node:
+                return
+            if not self._relation_graph_node_can_be_saved(node):
+                self._error(self._relation_graph_node_message(node) or "当前节点不能保存为资料库条目")
+                return
+            name = str(node.get("name") or node.get("label") or "").strip()
+            if not name:
+                self._error("当前节点缺少名称，无法保存")
+                return
+            kind = str(node.get("kind", ""))
+            details = {
+                "source": "relation_graph",
+                "created_from": str(node.get("source", "")),
+                "graph_node_id": str(node.get("id", "")),
+                "evidence": node.get("evidence", []),
+            }
+            item_id = self.store.save_world_item(
+                project_id,
+                {
+                    "kind": kind,
+                    "name": name,
+                    "summary": str(node.get("summary", "") or ""),
+                    "details_json": details,
+                    "tags": "关系图生成",
+                    "status": "candidate",
+                },
+            )
+            self.refresh_world_items()
+            self.refresh_relation_graph()
+            self._ok("已保存为资料库条目")
+            if item_id:
+                self._open_world_item_from_graph({"kind": kind, "source_id": item_id})
+
         def _project_shelf_label(self, project: dict[str, Any]) -> str:
             title = str(project.get("title", "") or "未命名项目").strip()
             genre = str(project.get("genre", "") or "").strip()
@@ -2482,6 +2915,10 @@ if PYSIDE6_AVAILABLE:
                 self.logs_text,
             ]:
                 widget.clear()
+            if hasattr(self, "relation_graph_detail"):
+                self.relation_graph_detail.clear()
+                self.current_relation_graph_item = None
+                self.refresh_relation_graph()
             self._clear_structure_form()
             self._clear_world_form()
 
@@ -2796,6 +3233,7 @@ if PYSIDE6_AVAILABLE:
             self.current_version_ids = []
             self._clear_structure_form()
             self.refresh_world_items()
+            self.refresh_relation_graph()
             self.refresh_structure()
             self.refresh_versions()
             self.refresh_logs()
@@ -3831,6 +4269,7 @@ if PYSIDE6_AVAILABLE:
         def refresh_all_project_views(self) -> None:
             self.refresh_outline_versions()
             self.refresh_world_items()
+            self.refresh_relation_graph()
             self.refresh_structure()
             self.refresh_versions()
             self.refresh_logs()

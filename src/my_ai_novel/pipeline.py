@@ -503,13 +503,55 @@ class NovelPipeline:
             )
             created_chapters += 1
             for section_data in chapter_data.get("sections", []):
-                self.store.save_section(chapter_id, {**section_data, "status": "planned"})
+                section_payload = {**section_data, "status": "planned"}
+                if outline_planning.get("outline_mode") == OUTLINE_MODE_SERIAL:
+                    section_payload = self._serial_density_section_payload(section_payload)
+                self.store.save_section(chapter_id, section_payload)
                 created_sections += 1
         world_items = 0
         for item in self._outline_world_item_candidates(split_metadata, self._existing_world_item_keys(project_id)):
             self.store.upsert_world_item(project_id, item)
             world_items += 1
         return {"chapters": created_chapters, "sections": created_sections, "world_items": world_items}
+
+    def _serial_density_section_payload(self, section_data: dict[str, Any]) -> dict[str, Any]:
+        data = dict(section_data)
+        density_fields = (
+            ("section_focus", "小节唯一重点"),
+            ("immediate_goal", "即时目标"),
+            ("immediate_obstacle", "即时阻力"),
+            ("information_release", "信息释放"),
+            ("ending_push", "结尾推动"),
+        )
+        scene_notes = [
+            f"{label}：{str(data.get(key) or '').strip()}"
+            for key, label in density_fields
+            if str(data.get(key) or "").strip()
+        ]
+        if scene_notes:
+            scene = str(data.get("scene") or "").strip()
+            data["scene"] = "\n".join([part for part in [scene, *scene_notes] if part])
+        if str(data.get("immediate_goal") or "").strip() and not str(data.get("goal") or "").strip():
+            data["goal"] = str(data.get("immediate_goal") or "").strip()
+        if str(data.get("immediate_obstacle") or "").strip() and not str(data.get("conflict") or "").strip():
+            data["conflict"] = str(data.get("immediate_obstacle") or "").strip()
+        if str(data.get("emotion_shift") or "").strip():
+            data["emotion_shift"] = str(data.get("emotion_shift") or "").strip()
+        if str(data.get("ending_push") or "").strip():
+            must_happen = self._text_list(data.get("must_happen_json", data.get("must_happen", [])))
+            ending_push = f"结尾推动：{str(data.get('ending_push') or '').strip()}"
+            if ending_push not in must_happen:
+                must_happen.append(ending_push)
+            data["must_happen"] = must_happen
+        density_guard = self._text_list(data.get("density_guard", []))
+        if density_guard:
+            forbidden = self._text_list(data.get("forbidden_json", data.get("forbidden", [])))
+            for item in density_guard:
+                guard = f"密度限制：{item}"
+                if guard not in forbidden:
+                    forbidden.append(guard)
+            data["forbidden"] = forbidden
+        return data
 
     def _chapter_number_offset(self, project_id: int) -> int:
         chapter_numbers = [
@@ -1445,39 +1487,15 @@ class NovelPipeline:
         for chapter in metadata.get("chapters", []):
             if not isinstance(chapter, dict):
                 continue
-            chapter_label = self._numbered_label("第{number}章", chapter)
             candidates.extend(self._world_items_from_value("character", chapter.get("characters"), source))
             candidates.extend(self._world_items_from_value("location", chapter.get("location"), source))
             candidates.extend(self._world_items_from_value("forbidden", chapter.get("forbidden"), source))
-            if chapter.get("story_time"):
-                candidates.append(
-                    self._world_item(
-                        "timeline_event",
-                        f"{chapter_label}：{chapter.get('story_time')}",
-                        source,
-                        {"scope": "chapter", "chapter": chapter.get("title", "")},
-                    )
-                )
             for section in chapter.get("sections", []):
                 if not isinstance(section, dict):
                     continue
-                section_label = self._numbered_label("第{number}节", section)
                 candidates.extend(self._world_items_from_value("character", section.get("characters"), source))
                 candidates.extend(self._world_items_from_value("location", section.get("location"), source))
                 candidates.extend(self._world_items_from_value("forbidden", section.get("forbidden"), source))
-                if section.get("story_time"):
-                    candidates.append(
-                        self._world_item(
-                            "timeline_event",
-                            f"{chapter_label}{section_label}：{section.get('story_time')}",
-                            source,
-                            {
-                                "scope": "section",
-                                "chapter": chapter.get("title", ""),
-                                "section": section.get("title", ""),
-                            },
-                        )
-                    )
 
         existing_keys = existing_keys or set()
         deduped: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1545,6 +1563,8 @@ class NovelPipeline:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
             module_patches = raw.get("module_patches") if isinstance(raw.get("module_patches"), dict) else {}
             details = merge_module_patches(details, module_patches) if module_patches else details
+            if kind == "timeline_event":
+                details = self._timeline_event_details(raw, details)
             items.append(
                 {
                     "kind": kind,
@@ -1764,6 +1784,8 @@ class NovelPipeline:
         if isinstance(value, dict):
             name = self._first_text(value, ("name", "title", "event", "rule", "content", "text", "item"))
             summary = self._first_text(value, ("summary", "description", "details", "goal", "outline"))
+            if kind == "timeline_event":
+                value = self._timeline_event_details(value, value)
             return [self._world_item(kind, name, summary or source, value)]
         if isinstance(value, list):
             items: list[dict[str, Any]] = []
@@ -1782,6 +1804,23 @@ class NovelPipeline:
             "tags": "总体框架,章节拆分,自动候选",
             "status": "candidate",
         }
+
+    @staticmethod
+    def _timeline_event_details(raw: dict[str, Any], details: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(details)
+        for source_key, target_key in (
+            ("time_text", "time_text"),
+            ("time", "time_text"),
+            ("story_time", "time_text"),
+            ("sequence", "sequence"),
+            ("order", "sequence"),
+            ("phase", "phase"),
+            ("status", "status"),
+        ):
+            value = raw.get(source_key)
+            if value not in (None, "") and normalized.get(target_key) in (None, ""):
+                normalized[target_key] = value
+        return normalized
 
     @staticmethod
     def _merged_details(existing_json: str | None, incoming: Any) -> dict[str, Any]:

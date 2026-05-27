@@ -418,12 +418,14 @@ class UISmokeTests(unittest.TestCase):
 
     def test_world_kind_label_uses_chinese_display_name(self) -> None:
         self.assertEqual(world_kind_label("character"), "角色卡")
-        self.assertEqual(world_kind_label("timeline_event"), "时间线")
+        self.assertEqual(world_kind_label("timeline_event"), "事件")
         self.assertEqual(world_kind_label("unknown_kind"), "unknown_kind")
 
     def test_world_kind_value_preserves_internal_enum(self) -> None:
         self.assertEqual(world_kind_value("角色卡"), "character")
         self.assertEqual(world_kind_value("人物设定"), "character")
+        self.assertEqual(world_kind_value("事件"), "timeline_event")
+        self.assertEqual(world_kind_value("时间线"), "timeline_event")
         self.assertEqual(world_kind_value("伏笔"), "foreshadowing")
         self.assertEqual(world_kind_value("character"), "character")
 
@@ -2277,6 +2279,39 @@ class UISmokeTests(unittest.TestCase):
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         self.assertIn("def _resize_dialog_to_window", source)
         self.assertGreaterEqual(source.count("self._resize_dialog_to_window(dialog)"), 2)
+
+    def test_pyside_relation_graph_page_exists(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("from .relation_graph import build_character_graph, build_event_graph", source)
+        self.assertIn("QGraphicsView", source)
+        self.assertIn("QGraphicsScene", source)
+        self.assertIn("class RelationGraphView(QGraphicsView)", source)
+        self.assertIn("def _build_relation_graph_page", source)
+        self.assertIn('page = self._add_page("关系图")', source)
+        self.assertIn('"人物关系"', source)
+        self.assertIn('"事件关系"', source)
+        self.assertIn('"显示弱推断关系"', source)
+        self.assertIn("def refresh_relation_graph", source)
+        self.assertIn("def _filter_relation_graph_for_mode", source)
+        self.assertIn('allowed = {"character", "organization"}', source)
+        self.assertIn("build_character_graph(world_items, chapters, sections_by_chapter, include_inferred)", source)
+        self.assertIn("build_event_graph(world_items, chapters, sections_by_chapter, include_inferred)", source)
+        self.assertIn("def _open_world_item_from_graph", source)
+        self.assertIn("def save_selected_relation_graph_item", source)
+        self.assertIn("def _relation_graph_allowed_save_kinds", source)
+        self.assertIn('return {"character", "organization"}', source)
+        self.assertIn("def _relation_graph_kind_label", source)
+        self.assertIn('"保存为资料库条目"', source)
+        self.assertIn("这是推断节点，尚未写入资料库", source)
+        self.assertIn("这是缺失引用节点，资料库中尚无对应条目", source)
+        self.assertIn('"created_from": str(node.get("source", ""))', source)
+        self.assertIn('"关系图生成"', source)
+        self.assertIn("def _node_pen", source)
+        self.assertIn('"character": "#2f80d9"', source)
+        self.assertIn('"location": "#2d9a55"', source)
+        self.assertIn('"organization": "#7b61d9"', source)
+        self.assertIn("self.stack.setCurrentWidget(self.world_page)", source)
+        self.assertIn("self._build_relation_graph_page()", source)
 
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1

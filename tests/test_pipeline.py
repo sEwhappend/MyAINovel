@@ -10,6 +10,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from my_ai_novel.pipeline import NovelPipeline, parse_length_target
+from my_ai_novel.prompts import AGENT_SYSTEM_PROMPTS, SCHEMA_HINTS
 from my_ai_novel.storage import NovelStore
 
 
@@ -482,7 +483,7 @@ class PipelineTests(unittest.TestCase):
     def test_outline_split_draft_review_rewrite_flow(self) -> None:
         outline = self.pipeline.expand_global_concept(self.project_id)
         split = self.pipeline.confirm_outline_split(self.project_id, outline["version_id"])
-        self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 5})
+        self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 3})
         chapter = self.store.list_chapters(self.project_id)[0]
         section = self.store.list_sections(chapter["id"])[0]
         draft = self.pipeline.write_section_draft(self.project_id, section["id"])
@@ -656,7 +657,7 @@ class PipelineTests(unittest.TestCase):
 
         split = pipeline.confirm_outline_split(self.project_id, outline["version_id"])
 
-        self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 5})
+        self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 3})
         self.assertEqual([call["agent_name"] for call in llm.calls], ["global_architect", "outline_splitter"])
         split_versions = self.store.list_versions(self.project_id, kind="outline_split")
         self.assertEqual(len(split_versions), 1)
@@ -1004,15 +1005,145 @@ class PipelineTests(unittest.TestCase):
 
         split = self.pipeline.confirm_outline_split(self.project_id, version_id)
 
-        self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 6})
+        self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 4})
         items = self.store.list_world_items(self.project_id)
         names_by_kind = {}
         for item in items:
             names_by_kind.setdefault(item["kind"], []).append(item["name"])
         self.assertEqual(names_by_kind["character"], ["林砚"])
         self.assertEqual(names_by_kind["location"], ["旧宅"])
-        self.assertIn("十年前旧案", names_by_kind["timeline_event"])
+        self.assertEqual(names_by_kind["timeline_event"], ["十年前旧案"])
+        self.assertNotIn("第1章：雨夜", names_by_kind["timeline_event"])
+        self.assertNotIn("第1章第1节：十点", names_by_kind["timeline_event"])
         self.assertEqual(names_by_kind["forbidden"], ["提前揭示真相"])
+
+    def test_timeline_event_candidates_preserve_ordering_fields(self) -> None:
+        metadata = {
+            "timeline_events": [
+                {
+                    "event": "入学试炼",
+                    "summary": "主角第一次公开使用能力",
+                    "time": "第一周",
+                    "sequence": 2,
+                    "phase": "academy-start",
+                    "status": "planned",
+                    "details": {"participants": ["林砚"]},
+                }
+            ],
+            "world_items": [
+                {
+                    "kind": "timeline_event",
+                    "name": "钟楼事故",
+                    "summary": "旧事故改变学院制度",
+                    "details": {"time_text": "十年前", "sequence": 1, "phase": "backstory"},
+                    "status": "candidate",
+                }
+            ],
+        }
+        candidates = self.pipeline._outline_world_item_candidates(metadata)
+        events = {item["name"]: item for item in candidates if item["kind"] == "timeline_event"}
+
+        self.assertEqual(events["入学试炼"]["details"]["time_text"], "第一周")
+        self.assertEqual(events["入学试炼"]["details"]["sequence"], 2)
+        self.assertEqual(events["入学试炼"]["details"]["phase"], "academy-start")
+        self.assertEqual(events["入学试炼"]["details"]["status"], "planned")
+        self.assertEqual(events["钟楼事故"]["details"]["time_text"], "十年前")
+        self.assertEqual(events["钟楼事故"]["details"]["sequence"], 1)
+
+    def test_outline_prompts_keep_serial_density_separate_from_full_book(self) -> None:
+        global_prompt = AGENT_SYSTEM_PROMPTS["global_architect"]
+        splitter_prompt = AGENT_SYSTEM_PROMPTS["outline_splitter"]
+
+        self.assertIn("outline_mode=full_book 时仍按全书压缩版处理", global_prompt)
+        self.assertIn("允许概括整本书的主线、阶段变化和结局方向", global_prompt)
+        self.assertIn("outline_mode=serial 时只规划一个连载单元", global_prompt)
+        self.assertIn("本次连载规划", global_prompt)
+        self.assertIn("full_book 模式仍是整书压缩拆分", splitter_prompt)
+        self.assertIn("serial 模式只拆本次连载单元", splitter_prompt)
+        self.assertIn("小节是一个可表演场景", splitter_prompt)
+        self.assertIn("一个场景目标", splitter_prompt)
+        self.assertIn("即时目标", splitter_prompt)
+        self.assertIn("即时阻力", splitter_prompt)
+        self.assertIn("信息释放", splitter_prompt)
+        self.assertIn("情绪变化", splitter_prompt)
+        self.assertIn("结尾推动", splitter_prompt)
+        self.assertIn("chapter.story_time 和 section.story_time 只是章节/小节自身的时间标记", splitter_prompt)
+        section_hint = SCHEMA_HINTS["outline_splitter"]["chapters"][0]["sections"][0]
+        for field in (
+            "section_focus",
+            "immediate_goal",
+            "immediate_obstacle",
+            "information_release",
+            "emotion_shift",
+            "ending_push",
+            "density_guard",
+        ):
+            self.assertIn(field, section_hint)
+        world_item_hint = SCHEMA_HINTS["outline_splitter"]["world_items"][0]["details"]
+        self.assertIn("time_text", world_item_hint)
+        self.assertIn("sequence", world_item_hint)
+
+    def test_draft_and_reviewer_prompts_guard_against_low_density_summaries(self) -> None:
+        draft_prompt = AGENT_SYSTEM_PROMPTS["draft_writer"]
+        reviewer_prompt = AGENT_SYSTEM_PROMPTS["reviewer"]
+
+        self.assertIn("流水账", draft_prompt)
+        self.assertIn("连续场景", draft_prompt)
+        self.assertIn("信息密度", draft_prompt)
+        self.assertIn("流水账", reviewer_prompt)
+        self.assertIn("信息密度", reviewer_prompt)
+        self.assertIn("即时目标", reviewer_prompt)
+        self.assertIn("即时阻力", reviewer_prompt)
+        self.assertIn("结尾推动", reviewer_prompt)
+
+    def test_serial_outline_split_folds_density_fields_into_section_payload(self) -> None:
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "连载小节密度",
+                "content": "{}",
+                "metadata": {
+                    "outline_planning": {"outline_mode": "serial", "serial_action": "revise_current"},
+                    "chapters": [
+                        {
+                            "number": 1,
+                            "title": "醒来",
+                            "sections": [
+                                {
+                                    "number": 1,
+                                    "title": "镜前",
+                                    "scene": "主角在镜前确认陌生身份。",
+                                    "section_focus": "确认身份异常",
+                                    "immediate_goal": "确认自己是否仍在原来的世界",
+                                    "immediate_obstacle": "女仆即将进门打断",
+                                    "information_release": "镜中纹章和记忆不一致",
+                                    "emotion_shift": "茫然到警惕",
+                                    "ending_push": "第一封预言信滑入门缝",
+                                    "density_guard": ["不要解释王国历史", "不要引入教会组织"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        )
+
+        self.pipeline.confirm_outline_split(self.project_id, version_id)
+
+        chapter = self.store.list_chapters(self.project_id)[0]
+        section = self.store.list_sections(chapter["id"])[0]
+        self.assertIn("小节唯一重点：确认身份异常", section["scene"])
+        self.assertIn("即时目标：确认自己是否仍在原来的世界", section["scene"])
+        self.assertIn("即时阻力：女仆即将进门打断", section["scene"])
+        self.assertIn("信息释放：镜中纹章和记忆不一致", section["scene"])
+        self.assertIn("结尾推动：第一封预言信滑入门缝", section["scene"])
+        self.assertEqual(section["goal"], "确认自己是否仍在原来的世界")
+        self.assertEqual(section["conflict"], "女仆即将进门打断")
+        self.assertEqual(section["emotion_shift"], "茫然到警惕")
+        self.assertIn("结尾推动：第一封预言信滑入门缝", json.loads(section["must_happen_json"]))
+        self.assertIn("密度限制：不要解释王国历史", json.loads(section["forbidden_json"]))
+        self.assertIn("密度限制：不要引入教会组织", json.loads(section["forbidden_json"]))
 
     def test_confirm_outline_split_replaces_previous_chapters_and_auto_candidates(self) -> None:
         self.store.save_world_item(

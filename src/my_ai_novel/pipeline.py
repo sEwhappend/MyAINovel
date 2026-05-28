@@ -424,7 +424,7 @@ class NovelPipeline:
         version = self._require(self.store.get_version(version_id), "version")
         metadata = self._loads(version.get("metadata_json")) or self._loads(version.get("content"))
         if isinstance(metadata.get("chapters"), list):
-            return self._apply_outline_split(project_id, project, metadata)
+            return self._apply_outline_split(project_id, project, self._limit_serial_split_to_capacity(metadata))
 
         payload = self._outline_split_payload(project, version, metadata)
         messages = build_messages("outline_splitter", self._with_project_writing_constraints(payload))
@@ -815,7 +815,10 @@ class NovelPipeline:
             "kind": kind,
             "name": str(result.get("name", "") or "").strip() or f"新{kind}",
             "summary": str(result.get("summary", "") or "").strip(),
-            "details": result.get("details") if isinstance(result.get("details"), dict) else {},
+            "details": self._normalized_world_item_details(
+                kind,
+                result.get("details") if isinstance(result.get("details"), dict) else {},
+            ),
             "tags": str(result.get("tags", "") or "").strip(),
             "status": str(result.get("status", "") or "candidate").strip() or "candidate",
         }
@@ -1360,6 +1363,17 @@ class NovelPipeline:
             ).strip(),
             "planning_note": str(raw.get("planning_note") or "").strip(),
         }
+        chapters = parse_length_target(planning["planning_chapter_count"])
+        sections_per_chapter = parse_length_target(planning["section_count_approx"])
+        if chapters and sections_per_chapter:
+            planning["estimated_total_sections"] = str(chapters * sections_per_chapter)
+            if outline_mode == OUTLINE_MODE_SERIAL:
+                planning["serial_content_budget"] = {
+                    "planned_chapters": chapters,
+                    "sections_per_chapter": sections_per_chapter,
+                    "total_sections": chapters * sections_per_chapter,
+                    "rule": "本次大纲内容量必须适配 total_sections；每个小节只承载一个可表演场景，不要输出超过可拆小节数的剧情拍点。",
+                }
         legacy_section_min = str(raw.get("section_count_min") or "").strip()
         legacy_section_max = str(raw.get("section_count_max") or "").strip()
         if legacy_section_min:
@@ -1411,7 +1425,7 @@ class NovelPipeline:
         outline_metadata: dict[str, Any],
     ) -> dict[str, Any]:
         if isinstance(outline_metadata.get("chapters"), list):
-            return outline_metadata
+            return self._limit_serial_split_to_capacity(outline_metadata)
         result = self._call("outline_splitter", self._outline_split_payload(project, version, outline_metadata))
         result = self._with_split_planning(result, outline_metadata)
         self._save_outline_split_version(int(project["id"]), result)
@@ -1419,11 +1433,50 @@ class NovelPipeline:
 
     def _with_split_planning(self, split_metadata: dict[str, Any], outline_metadata: dict[str, Any]) -> dict[str, Any]:
         if split_metadata.get("outline_planning"):
-            return split_metadata
+            return self._limit_serial_split_to_capacity(split_metadata)
         planning = outline_metadata.get("outline_planning")
         if isinstance(planning, dict):
-            return {**split_metadata, "outline_planning": planning}
-        return split_metadata
+            return self._limit_serial_split_to_capacity({**split_metadata, "outline_planning": planning})
+        return self._limit_serial_split_to_capacity(split_metadata)
+
+    def _limit_serial_split_to_capacity(self, split_metadata: dict[str, Any]) -> dict[str, Any]:
+        planning = self._outline_planning({}, split_metadata.get("outline_planning")) if isinstance(split_metadata.get("outline_planning"), dict) else {}
+        if planning.get("outline_mode") != OUTLINE_MODE_SERIAL:
+            return split_metadata
+        chapter_limit = parse_length_target(planning.get("planning_chapter_count"))
+        section_limit = parse_length_target(planning.get("section_count_approx"))
+        total_limit = parse_length_target(planning.get("estimated_total_sections"))
+        if not chapter_limit and not section_limit and not total_limit:
+            return split_metadata
+
+        remaining_sections = total_limit
+        trimmed_chapters: list[dict[str, Any]] = []
+        for chapter in split_metadata.get("chapters", []):
+            if not isinstance(chapter, dict):
+                continue
+            if chapter_limit and len(trimmed_chapters) >= chapter_limit:
+                break
+            chapter_copy = dict(chapter)
+            sections = [section for section in chapter_copy.get("sections", []) if isinstance(section, dict)]
+            per_chapter_limit = section_limit or len(sections)
+            if remaining_sections is not None:
+                per_chapter_limit = min(per_chapter_limit, max(remaining_sections, 0))
+            chapter_copy["sections"] = sections[:per_chapter_limit]
+            if remaining_sections is not None:
+                remaining_sections -= len(chapter_copy["sections"])
+            trimmed_chapters.append(chapter_copy)
+            if remaining_sections is not None and remaining_sections <= 0:
+                break
+
+        if len(trimmed_chapters) == len(split_metadata.get("chapters", [])):
+            unchanged = True
+            for original, trimmed in zip(split_metadata.get("chapters", []), trimmed_chapters):
+                if not isinstance(original, dict) or len(original.get("sections", [])) != len(trimmed.get("sections", [])):
+                    unchanged = False
+                    break
+            if unchanged:
+                return {**split_metadata, "outline_planning": planning}
+        return {**split_metadata, "chapters": trimmed_chapters, "outline_planning": planning}
 
     def _outline_split_payload(
         self,
@@ -1504,7 +1557,7 @@ class NovelPipeline:
             if not name:
                 continue
             key = (item.get("kind", ""), self._normalized_world_candidate_name(name))
-            if key in existing_keys:
+            if key in existing_keys and not self._has_relation_graph_details(item):
                 continue
             deduped.setdefault(key, item)
         return list(deduped.values())
@@ -1565,6 +1618,7 @@ class NovelPipeline:
             details = merge_module_patches(details, module_patches) if module_patches else details
             if kind == "timeline_event":
                 details = self._timeline_event_details(raw, details)
+            details = self._normalized_world_item_details(kind, details)
             items.append(
                 {
                     "kind": kind,
@@ -1599,12 +1653,14 @@ class NovelPipeline:
             if kind not in valid_kinds or not name:
                 continue
             details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+            details = self._normalized_world_item_details(kind, details)
             items.append(
                 {
                     "kind": kind,
                     "name": name,
                     "summary": raw.get("summary", "来自章末记忆反写"),
                     "details": {
+                        **details,
                         "source": "chapter_memory",
                         "chapter_memory": [
                             {
@@ -1794,13 +1850,12 @@ class NovelPipeline:
             return items
         return []
 
-    @staticmethod
-    def _world_item(kind: str, name: str, summary: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _world_item(self, kind: str, name: str, summary: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "kind": kind,
             "name": name.strip(),
             "summary": summary,
-            "details": {"source": "outline_split", **(details or {})},
+            "details": {"source": "outline_split", **self._normalized_world_item_details(kind, details or {})},
             "tags": "总体框架,章节拆分,自动候选",
             "status": "candidate",
         }
@@ -1821,6 +1876,64 @@ class NovelPipeline:
             if value not in (None, "") and normalized.get(target_key) in (None, ""):
                 normalized[target_key] = value
         return normalized
+
+    def _normalized_world_item_details(self, kind: str, details: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(details)
+        nested_details = normalized.get("details")
+        if isinstance(nested_details, dict):
+            normalized.update({key: value for key, value in nested_details.items() if key not in normalized})
+        note = normalized.get("note")
+        if isinstance(note, dict):
+            for key in self._relation_graph_detail_fields(kind):
+                value = note.get(key)
+                if self._has_value(value) and not self._has_value(normalized.get(key)):
+                    normalized[key] = value
+        if kind == "timeline_event":
+            normalized = self._timeline_event_details(normalized, normalized)
+        return normalized
+
+    @staticmethod
+    def _relation_graph_detail_fields(kind: str) -> tuple[str, ...]:
+        fields = {
+            "character": (
+                "relationships",
+                "organization",
+                "organizations",
+                "faction",
+                "affiliation",
+                "affiliations",
+            ),
+            "organization": ("members", "member_names", "leader", "leaders"),
+            "timeline_event": (
+                "graph_links",
+                "causes",
+                "caused_by",
+                "participants",
+                "characters",
+                "location",
+                "locations",
+                "related_organizations",
+                "organizations",
+                "related_foreshadowing",
+                "related_rules",
+                "forbidden",
+            ),
+        }
+        return fields.get(kind, ())
+
+    @staticmethod
+    def _has_value(value: Any) -> bool:
+        if value in (None, ""):
+            return False
+        if isinstance(value, (list, tuple, set, dict)):
+            return bool(value)
+        return True
+
+    def _has_relation_graph_details(self, item: dict[str, Any]) -> bool:
+        kind = str(item.get("kind") or "")
+        details = item.get("details") if isinstance(item.get("details"), dict) else {}
+        normalized = self._normalized_world_item_details(kind, details)
+        return any(self._has_value(normalized.get(key)) for key in self._relation_graph_detail_fields(kind))
 
     @staticmethod
     def _merged_details(existing_json: str | None, incoming: Any) -> dict[str, Any]:

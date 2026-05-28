@@ -22,7 +22,7 @@ AGENT_SYSTEM_PROMPTS = {
     "main_character_generator": "你是主要角色卡生成 Agent。你的任务是根据项目名称、题材、目标读者、总世界书、风格说明、总体概括、叙事视角和项目标签，生成一个默认主要角色卡。只生成一个角色；角色必须能作为全书故事大纲的主要推动者。不要生成章节、剧情大纲或多个候选。输出必须能直接保存为资料库 character 角色卡。details.relationships 只记录与其他角色卡之间的人物关系；家族、教会、学院、王室、公会、商会、军团、社交圈等组织/势力不要写入 relationships，应写入 details.affiliations/details.organizations，或后续作为 organization 资料条目单独创建。",
     "novel_candidate_generator": "你是小说项目候选方案生成 Agent。你的任务是根据用户像搜索小说一样输入的条件、已选标签、排除标签、读者、视角、篇幅和自由偏好，生成 3-6 个原创可写小说方案。不要搜索、复述或模仿真实已存在作品；不要直接写正文；不要生成全书大纲或章节拆分。每个候选必须像小说网站结果卡片一样可供选择，并且要能继续转换为可编辑项目字段。字段语义必须清楚：style_direction 只写自然语言写作风格，不要输出 <xxx>、尖括号占位或标签列表；world_form 写世界形式、社会/力量规则的总体形态；world_history 写影响当前故事的历史背景；world_direction 可补充世界观重点，但必须偏世界形式和历史，而不是剧情简介；novel_blurb 写类似小说网站简介的总体概括，突出主角处境、开局诱因和阅读看点，不要写成设定清单。",
     "project_assistant": "你是项目资料辅助修改 Agent。你的任务是根据当前项目表单、用户选择的标签、对白引号和修改方向，生成可供用户确认后应用的项目字段修改建议。只输出 project_patch，不要保存项目，不要生成章节、正文、角色卡或多个候选。project_patch 只能包含 title、genre、style、target_readers、pov、world_summary、writing_style_guide、global_concept 这些字段；没有必要修改的字段输出空字符串或省略。必须尊重用户已有内容，不要无故清空、改名或完全重写；如果用户 direction 要求局部调整，就只调整相关字段。",
-    "chapter_memory_writer": "你是章末记忆回写 Agent，只总结本章已定稿正文中与 called_world_items 相关的经历、事件影响、关系变化、伏笔推进和禁止事项检查，并输出可反写资料库的结构化条目；不要改写基础设定。",
+    "chapter_memory_writer": "你是章末记忆回写 Agent，只总结本章已定稿正文中与 called_world_items 相关的经历、事件影响、关系变化、伏笔推进和禁止事项检查，并输出可反写资料库的结构化条目；不要改写基础设定。若输出角色关系变化，写入 details.relationship_delta 或角色 details.relationships；若输出真实事件，必须把 participants、location、related_organizations、causes、caused_by 或 graph_links 写在 details 顶层，便于事件关系图读取。",
 }
 
 AGENT_SYSTEM_PROMPTS["global_architect"] += (
@@ -31,10 +31,16 @@ AGENT_SYSTEM_PROMPTS["global_architect"] += (
     "连载模式应优先保留少量核心角色、一个主要推进目标、少量自然阻力和可继续连载的未解问题。"
     "连载模式下，本次大纲只服务一个阶段性阅读期待；如果项目资料很多，只选择本次实际会登场或影响当前场景的少量资料。"
     "输出应体现这几章连续读起来发生了什么，而不是整本书讲了什么。"
+    "若 outline_planning 包含 estimated_total_sections 或 serial_content_budget，生成/修改大纲的内容量必须严格适配该小节容量："
+    "不要写出超过 total_sections 可承载数量的剧情拍点；一个小节容量只对应一个可表演场景或一个连续拍点。"
+    "当预计小节数很少时，应主动缩小本次大纲范围，把多余事件、支线、设定解释和危机留到后续连载单元。"
 )
 AGENT_SYSTEM_PROMPTS["outline_splitter"] += (
     "补充约束：full_book 模式仍是整书压缩拆分；serial 模式只拆本次连载单元，章节应像连续更新的几章，而不是完整作品摘要。"
     "serial 模式下每章只承担少量剧情推进，避免每章都塞入新地点、新势力、新规则、重大反转和结局级信息。"
+    "serial 模式下必须服从 planning_chapter_count、section_count_approx、estimated_total_sections 和 serial_content_budget："
+    "输出章节数不得超过 planning_chapter_count；每章小节数不得超过 section_count_approx；总小节数不得超过 estimated_total_sections。"
+    "如果 expanded_outline 内容多于这些小节能承载的容量，只选择最靠前、最必要的一段剧情拆分，其余明确视为后续连载，不要硬塞进当前小节。"
     "serial 模式下，每章只承担一个主要变化，最多带一个次级变化；每章通常拆成 2-3 个小节。"
     "serial 模式下，每一小节必须是一个可表演场景或一个场景中的连续拍点，而不是剧情摘要；换言之，小节是一个可表演场景。"
     "每一小节只允许一个场景目标、一个即时目标、一个即时阻力、一条信息释放、一个情绪变化和一个结尾推动点。"
@@ -44,6 +50,11 @@ AGENT_SYSTEM_PROMPTS["outline_splitter"] += (
     "chapter.story_time 和 section.story_time 只是章节/小节自身的时间标记，不是资料库事件，不要因为它们创建 world_items。"
     "只有真正改变人物、组织、规则、伏笔或世界状态的事件才输出为 kind=timeline_event 的 world_items；"
     "这类事件的 details 应尽量包含 time_text、sequence、phase、status，便于后续按时间顺序显示。"
+    "如果 world_items 输出角色、组织或事件，必须使用资料库关系图可读取的 details 顶层字段："
+    "角色关系写 details.relationships；角色所属组织写 details.affiliations 或 details.organizations；"
+    "组织成员写 details.members 或 details.leaders；事件参与者写 details.participants，地点写 details.location，"
+    "事件因果写 details.causes/details.caused_by，跨资料关联写 details.graph_links 或 related_organizations/related_foreshadowing/related_rules/forbidden。"
+    "不要只把这些信息写进 details.note。"
     "serial 模式下，world_items 只创建本次实际登场、调用或必须记忆的资料，不要把全书设定库一次性灌入本次规划。"
 )
 AGENT_SYSTEM_PROMPTS["draft_writer"] += (
@@ -123,6 +134,20 @@ SCHEMA_HINTS = {
                     "sequence": "int|string",
                     "phase": "string",
                     "status": "string",
+                    "relationships": "array; character only, character-to-character relationship edges",
+                    "affiliations": "array; character only, organization/faction memberships",
+                    "organizations": "array; character or timeline_event organization references",
+                    "members": "array; organization only, character members",
+                    "leaders": "array; organization only, character leaders",
+                    "participants": "array; timeline_event only, character names",
+                    "location": "string|array; timeline_event only, location names",
+                    "causes": "array; timeline_event names caused by this event",
+                    "caused_by": "array; timeline_event names that caused this event",
+                    "graph_links": "array; explicit graph links with target_kind, target, type",
+                    "related_organizations": "array; timeline_event organization names",
+                    "related_foreshadowing": "array; timeline_event foreshadowing names",
+                    "related_rules": "array; timeline_event rule names",
+                    "forbidden": "array; timeline_event forbidden item names",
                 },
                 "tags": "string",
                 "status": "string",
@@ -242,7 +267,24 @@ SCHEMA_HINTS = {
                 "kind": "character|location|organization|rule|timeline_event|foreshadowing|forbidden",
                 "name": "string",
                 "summary": "string",
-                "details": "object",
+                "details": {
+                    "note": "object",
+                    "relationships": "array; character relationship edges",
+                    "relationship_delta": "object|array|string; chapter memory relationship change",
+                    "affiliations": "array; character organization memberships",
+                    "organizations": "array; character or timeline_event organization references",
+                    "members": "array; organization members",
+                    "leaders": "array; organization leaders",
+                    "participants": "array; timeline_event character names",
+                    "location": "string|array; timeline_event location names",
+                    "causes": "array; timeline_event names caused by this event",
+                    "caused_by": "array; timeline_event names that caused this event",
+                    "graph_links": "array; explicit graph links with target_kind, target, type",
+                    "related_organizations": "array; timeline_event organization names",
+                    "related_foreshadowing": "array; timeline_event foreshadowing names",
+                    "related_rules": "array; timeline_event rule names",
+                    "forbidden": "array; timeline_event forbidden item names",
+                },
                 "module_patches": "object",
                 "tags": "string",
                 "status": "string",

@@ -11,6 +11,7 @@ if str(SRC) not in sys.path:
 
 from my_ai_novel.pipeline import NovelPipeline, parse_length_target
 from my_ai_novel.prompts import AGENT_SYSTEM_PROMPTS, SCHEMA_HINTS
+from my_ai_novel.relation_graph import build_character_graph, build_event_graph
 from my_ai_novel.storage import NovelStore
 
 
@@ -163,7 +164,11 @@ class FakeLLM:
                         "kind": "timeline_event",
                         "name": "旧宅雨夜发现拖痕",
                         "summary": "林砚在旧宅发现新的案件线索。",
-                        "details": {"chapter": "旧宅入口", "payoff_plan": "下一章追查"},
+                        "details": {
+                            "chapter": "旧宅入口",
+                            "payoff_plan": "下一章追查",
+                            "note": {"participants": ["林砚"], "location": "旧宅"},
+                        },
                         "tags": "线索",
                         "status": "candidate",
                     },
@@ -857,7 +862,24 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(planning["planning_chapter_count"], "10")
         self.assertEqual(planning["default_chapter_target_words"], "10000")
         self.assertEqual(planning["section_count_approx"], "4")
+        self.assertEqual(planning["estimated_total_sections"], "40")
         self.assertNotIn("default_section_target_words", planning)
+
+    def test_serial_outline_planning_derives_content_budget_from_section_capacity(self) -> None:
+        planning = self.pipeline._outline_planning(
+            {"length_target": "10000"},
+            {
+                "outline_mode": "serial",
+                "planning_target_words": "10000",
+                "planning_chapter_count": "2",
+                "section_count_approx": "1",
+            },
+        )
+
+        self.assertEqual(planning["estimated_total_sections"], "2")
+        self.assertEqual(planning["serial_content_budget"]["planned_chapters"], 2)
+        self.assertEqual(planning["serial_content_budget"]["sections_per_chapter"], 1)
+        self.assertEqual(planning["serial_content_budget"]["total_sections"], 2)
 
     def test_outline_planning_keeps_legacy_section_range_for_old_versions(self) -> None:
         planning = self.pipeline._outline_planning(
@@ -1050,6 +1072,91 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(events["钟楼事故"]["details"]["time_text"], "十年前")
         self.assertEqual(events["钟楼事故"]["details"]["sequence"], 1)
 
+    def test_outline_split_world_items_use_relation_graph_fields(self) -> None:
+        metadata = {
+            "chapters": [],
+            "world_items": [
+                {
+                    "kind": "character",
+                    "name": "林砚",
+                    "summary": "调查员",
+                    "details": {"note": {"relationships": [{"target": "顾眠", "type": "ally", "label": "同伴"}]}},
+                },
+                {"kind": "character", "name": "顾眠", "summary": "协力者", "details": {}},
+                {"kind": "location", "name": "旧宅", "summary": "雨夜旧宅", "details": {}},
+                {
+                    "kind": "timeline_event",
+                    "name": "旧宅追查",
+                    "summary": "两人进入旧宅追查拖痕。",
+                    "details": {
+                        "note": {
+                            "participants": ["林砚", "顾眠"],
+                            "location": "旧宅",
+                        },
+                        "time_text": "雨夜",
+                        "sequence": 1,
+                    },
+                },
+            ],
+        }
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "关系图资料拆分",
+                "content": json.dumps(metadata, ensure_ascii=False),
+                "metadata": metadata,
+            }
+        )
+
+        self.pipeline.confirm_outline_split(self.project_id, version_id)
+
+        world_items = self.store.list_world_items(self.project_id)
+        character_graph = build_character_graph(world_items)
+        event_graph = build_event_graph(world_items)
+        self.assertTrue(
+            any(edge["source"].startswith("character:") and edge["target"].startswith("character:") and edge["kind"] == "ally" for edge in character_graph["edges"])
+        )
+        self.assertTrue(any(edge["kind"] == "participant" for edge in event_graph["edges"]))
+        self.assertTrue(any(edge["kind"] == "located_at" for edge in event_graph["edges"]))
+
+    def test_outline_split_merges_relation_fields_into_existing_world_item(self) -> None:
+        self.store.save_world_item(
+            self.project_id,
+            {"kind": "character", "name": "林砚", "summary": "旧摘要", "details": {}, "tags": "", "status": "active"},
+        )
+        self.store.save_world_item(
+            self.project_id,
+            {"kind": "character", "name": "顾眠", "summary": "协力者", "details": {}, "tags": "", "status": "active"},
+        )
+        metadata = {
+            "chapters": [],
+            "world_items": [
+                {
+                    "kind": "character",
+                    "name": "林砚",
+                    "summary": "追加关系",
+                    "details": {"relationships": [{"target": "顾眠", "type": "trust_shift", "label": "信任提升"}]},
+                }
+            ],
+        }
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "已有资料补关系",
+                "content": json.dumps(metadata, ensure_ascii=False),
+                "metadata": metadata,
+            }
+        )
+
+        self.pipeline.confirm_outline_split(self.project_id, version_id)
+
+        world_items = self.store.list_world_items(self.project_id)
+        self.assertEqual(len([item for item in world_items if item["kind"] == "character" and item["name"] == "林砚"]), 1)
+        graph = build_character_graph(world_items)
+        self.assertTrue(any(edge["kind"] == "trust_shift" for edge in graph["edges"]))
+
     def test_outline_prompts_keep_serial_density_separate_from_full_book(self) -> None:
         global_prompt = AGENT_SYSTEM_PROMPTS["global_architect"]
         splitter_prompt = AGENT_SYSTEM_PROMPTS["outline_splitter"]
@@ -1057,9 +1164,13 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("outline_mode=full_book 时仍按全书压缩版处理", global_prompt)
         self.assertIn("允许概括整本书的主线、阶段变化和结局方向", global_prompt)
         self.assertIn("outline_mode=serial 时只规划一个连载单元", global_prompt)
+        self.assertIn("estimated_total_sections", global_prompt)
+        self.assertIn("超过 total_sections 可承载数量的剧情拍点", global_prompt)
         self.assertIn("本次连载规划", global_prompt)
         self.assertIn("full_book 模式仍是整书压缩拆分", splitter_prompt)
         self.assertIn("serial 模式只拆本次连载单元", splitter_prompt)
+        self.assertIn("总小节数不得超过 estimated_total_sections", splitter_prompt)
+        self.assertIn("其余明确视为后续连载", splitter_prompt)
         self.assertIn("小节是一个可表演场景", splitter_prompt)
         self.assertIn("一个场景目标", splitter_prompt)
         self.assertIn("即时目标", splitter_prompt)
@@ -1068,6 +1179,8 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("情绪变化", splitter_prompt)
         self.assertIn("结尾推动", splitter_prompt)
         self.assertIn("chapter.story_time 和 section.story_time 只是章节/小节自身的时间标记", splitter_prompt)
+        self.assertIn("details.relationships", splitter_prompt)
+        self.assertIn("details.participants", splitter_prompt)
         section_hint = SCHEMA_HINTS["outline_splitter"]["chapters"][0]["sections"][0]
         for field in (
             "section_focus",
@@ -1082,6 +1195,9 @@ class PipelineTests(unittest.TestCase):
         world_item_hint = SCHEMA_HINTS["outline_splitter"]["world_items"][0]["details"]
         self.assertIn("time_text", world_item_hint)
         self.assertIn("sequence", world_item_hint)
+        self.assertIn("relationships", world_item_hint)
+        self.assertIn("participants", world_item_hint)
+        self.assertIn("graph_links", world_item_hint)
 
     def test_draft_and_reviewer_prompts_guard_against_low_density_summaries(self) -> None:
         draft_prompt = AGENT_SYSTEM_PROMPTS["draft_writer"]
@@ -1144,6 +1260,50 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("结尾推动：第一封预言信滑入门缝", json.loads(section["must_happen_json"]))
         self.assertIn("密度限制：不要解释王国历史", json.loads(section["forbidden_json"]))
         self.assertIn("密度限制：不要引入教会组织", json.loads(section["forbidden_json"]))
+
+    def test_serial_outline_split_caps_chapters_and_sections_to_capacity(self) -> None:
+        version_id = self.store.save_version(
+            {
+                "project_id": self.project_id,
+                "kind": "global_outline",
+                "label": "过量连载拆分",
+                "content": "{}",
+                "metadata": {
+                    "outline_planning": {
+                        "outline_mode": "serial",
+                        "serial_action": "revise_current",
+                        "planning_chapter_count": "2",
+                        "section_count_approx": "1",
+                    },
+                    "chapters": [
+                        {
+                            "number": 1,
+                            "title": "第一章",
+                            "sections": [{"number": 1, "title": "一"}, {"number": 2, "title": "二"}],
+                        },
+                        {
+                            "number": 2,
+                            "title": "第二章",
+                            "sections": [{"number": 1, "title": "三"}, {"number": 2, "title": "四"}],
+                        },
+                        {
+                            "number": 3,
+                            "title": "第三章",
+                            "sections": [{"number": 1, "title": "五"}],
+                        },
+                    ],
+                },
+            }
+        )
+
+        split = self.pipeline.confirm_outline_split(self.project_id, version_id)
+
+        self.assertEqual(split["chapters"], 2)
+        self.assertEqual(split["sections"], 2)
+        chapters = self.store.list_chapters(self.project_id)
+        self.assertEqual([chapter["title"] for chapter in chapters], ["第一章", "第二章"])
+        self.assertEqual([section["title"] for section in self.store.list_sections(chapters[0]["id"])], ["一"])
+        self.assertEqual([section["title"] for section in self.store.list_sections(chapters[1]["id"])], ["三"])
 
     def test_confirm_outline_split_replaces_previous_chapters_and_auto_candidates(self) -> None:
         self.store.save_world_item(
@@ -1506,6 +1666,11 @@ class PipelineTests(unittest.TestCase):
         details = json.loads(items[0]["details_json"])
         self.assertEqual(details["source"], "chapter_memory")
         self.assertEqual(details["chapter_memory"][0]["payoff_plan"], "下一章追查")
+        self.assertEqual(details["participants"], ["林砚"])
+        self.assertEqual(details["location"], "旧宅")
+        event_graph = build_event_graph(items)
+        self.assertTrue(any(edge["kind"] == "participant" for edge in event_graph["edges"]))
+        self.assertTrue(any(edge["kind"] == "located_at" for edge in event_graph["edges"]))
 
     def test_write_chapter_memory_requires_finalized_sections(self) -> None:
         chapter_id = self.store.save_chapter(self.project_id, {"number": 1, "title": "空章"})

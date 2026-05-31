@@ -67,6 +67,26 @@ AGENT_SYSTEM_PROMPTS["reviewer"] += (
     "审稿时额外检查信息密度：如果连载模式正文像全书摘要、事件连续堆叠、缺少场景停顿，或一章内过度塞入新设定、新地点、新组织、新反转，应输出问题。"
     "同时检查每节是否缺少即时目标、即时阻力、信息释放、情绪变化或结尾推动点；如果小节像剧情摘要、流水账而不是可阅读正文，也应输出问题。"
 )
+AGENT_SYSTEM_PROMPTS["outline_splitter"] += (
+    "当 world_items 输出 kind=character 的角色卡时，details 必须同时包含 speech_style 和 speech_style_profile。"
+    "speech_style 是给 UI 显示的一句话说话风格摘要；speech_style_profile 是结构化声音档案，至少包含 sentence_length、formality、tone、addressing_habits、catchphrases、taboo_words、emotion_leak、information_style、conflict_style、dialogue_examples、anti_voice_rules。"
+    "不要把 speech_style 写成 object；如果角色暂时只是一句候选，也要给出最小可用的 speech_style_profile，方便后续正文写作区分人物声音。"
+)
+AGENT_SYSTEM_PROMPTS["world_item_creator"] += (
+    "若 current_kind=character，details 必须包含 identity、personality、motivation、speech_style、speech_style_profile、role_flags 和 modules。"
+    "speech_style 只写一句话摘要；speech_style_profile 写结构化声音档案，用于后续对白和正文生成，不要只在 summary 里描述说话方式。"
+)
+AGENT_SYSTEM_PROMPTS["tagged_character_creator"] += (
+    "必须根据角色定位和角色标签生成 speech_style_profile：标签造成的口癖、句长、礼貌程度、情绪泄露、冲突时说话方式和禁用表达都应写入该结构。"
+    "speech_style 保持一句话摘要，speech_style_profile 承载细节；不要把 speech_style 改成对象。"
+)
+AGENT_SYSTEM_PROMPTS["main_character_generator"] += (
+    "details 必须包含 speech_style 和 speech_style_profile。speech_style 是一句话摘要；speech_style_profile 是结构化声音档案，供后续正文、审稿和改写保持主角语言风格。"
+)
+AGENT_SYSTEM_PROMPTS["rewriter"] += (
+    "如果输入包含 rewrite_direction，必须优先按该用户修改方向处理，例如调整语气、强化冲突、保留指定段落或改变局部节奏；"
+    "但仍不得违背审稿意见、已确认设定、禁止事项和 preserve 中要求保留的内容。"
+)
 
 PROJECT_WRITING_CONSTRAINT_FIELDS = (
     "title",
@@ -85,6 +105,20 @@ PROJECT_WRITING_CONSTRAINT_FIELDS = (
     "writing_style_guide",
     "global_concept",
 )
+
+SPEECH_STYLE_PROFILE_SCHEMA = {
+    "sentence_length": "string; short/medium/long and rhythm notes",
+    "formality": "string; polite/casual/formal/rough and when it changes",
+    "tone": ["string; stable voice tones"],
+    "addressing_habits": ["string; how this character addresses others"],
+    "catchphrases": ["string; optional repeated phrases or verbal tics"],
+    "taboo_words": ["string; words or expressions this character avoids"],
+    "emotion_leak": "string; how emotion leaks into speech",
+    "information_style": "string; direct, evasive, analytical, metaphorical, etc.",
+    "conflict_style": "string; how the character argues, hides, interrupts, or retreats",
+    "dialogue_examples": ["string; 1-3 short example lines"],
+    "anti_voice_rules": ["string; what would make this character sound wrong"],
+}
 
 
 SCHEMA_HINTS = {
@@ -135,6 +169,8 @@ SCHEMA_HINTS = {
                     "phase": "string",
                     "status": "string",
                     "relationships": "array; character only, character-to-character relationship edges",
+                    "speech_style": "string; character only, one-line UI summary",
+                    "speech_style_profile": SPEECH_STYLE_PROFILE_SCHEMA,
                     "affiliations": "array; character only, organization/faction memberships",
                     "organizations": "array; character or timeline_event organization references",
                     "members": "array; organization only, character members",
@@ -180,7 +216,16 @@ SCHEMA_HINTS = {
         "kind": "character|location|organization|rule|timeline_event|foreshadowing|forbidden",
         "name": "string",
         "summary": "string",
-        "details": "object",
+        "details": {
+            "identity": "string; character only",
+            "personality": "string; character only",
+            "motivation": "string; character only",
+            "speech_style": "string; character only, one-line UI summary",
+            "speech_style_profile": SPEECH_STYLE_PROFILE_SCHEMA,
+            "role_flags": "object; character only",
+            "modules": "object; character only or kind-specific structured state",
+            "other_kind_specific_fields": "object; use for non-character details",
+        },
         "tags": "string",
         "status": "string",
     },
@@ -193,6 +238,7 @@ SCHEMA_HINTS = {
             "personality": "string",
             "motivation": "string",
             "speech_style": "string",
+            "speech_style_profile": SPEECH_STYLE_PROFILE_SCHEMA,
             "role_flags": {
                 "protagonist": "bool",
                 "pov": "bool",
@@ -215,6 +261,7 @@ SCHEMA_HINTS = {
             "personality": "string",
             "motivation": "string",
             "speech_style": "string",
+            "speech_style_profile": SPEECH_STYLE_PROFILE_SCHEMA,
             "role_flags": {
                 "protagonist": "bool",
                 "pov": "bool",

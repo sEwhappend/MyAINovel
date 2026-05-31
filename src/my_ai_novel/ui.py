@@ -351,6 +351,7 @@ class NovelDesktopUI:
             ("取消定稿", self.unfinalize_current_section),
             ("继续下一节", self.continue_next_section),
             ("比较版本", self.diff_versions),
+            ("删除版本", self.delete_selected_version),
         ]:
             ttk.Button(bar, text=text, command=command).pack(side="left", padx=(0, 4))
         self.rewrite_mode = tk.StringVar(value="全文改写")
@@ -363,11 +364,25 @@ class NovelDesktopUI:
         self.writing_auto_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar, text="自动化", variable=self.writing_auto_enabled).pack(side="left", padx=(8, 0))
         body = self._scrollable_frame(tab)
-        self.version_list = tk.Listbox(body, height=8, selectmode="extended")
-        self.version_list.pack(fill="x", pady=(8, 0))
+        direction_frame = ttk.Frame(body)
+        direction_frame.pack(fill="x", pady=(8, 0))
+        ttk.Label(direction_frame, text="AI 修改方向").pack(side="left")
+        self.rewrite_direction = tk.StringVar(value="")
+        ttk.Entry(direction_frame, textvariable=self.rewrite_direction).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        columns = ttk.Frame(body)
+        columns.pack(fill="both", expand=True, pady=(8, 0))
+        left_column = ttk.Frame(columns)
+        left_column.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        right_column = ttk.Frame(columns)
+        right_column.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        ttk.Label(left_column, text="版本列表").pack(anchor="w")
+        self.version_list = tk.Listbox(left_column, height=8, selectmode="extended")
+        self.version_list.pack(fill="both", expand=True, pady=(4, 0))
         self.version_list.bind("<<ListboxSelect>>", lambda _e: self.show_selected_version())
-        self.version_text = tk.Text(body, wrap="word", height=24)
-        self.version_text.pack(fill="both", expand=True, pady=(8, 0))
+        self.version_text_title = tk.StringVar(value="")
+        ttk.Label(right_column, textvariable=self.version_text_title).pack(anchor="w")
+        self.version_text = tk.Text(right_column, wrap="word", height=24)
+        self.version_text.pack(fill="both", expand=True, pady=(4, 0))
         ttk.Label(body, text="当前流式生成内容").pack(anchor="w", pady=(8, 0))
         self.current_generation_text = tk.Text(body, wrap="word", height=10)
         self.current_generation_text.pack(fill="both", expand=True, pady=(4, 0))
@@ -1205,9 +1220,19 @@ class NovelDesktopUI:
         if project_id and self.current_section_id:
             section_id = self.current_section_id
             rewrite_mode = self.rewrite_mode.get()
+            rewrite_direction_var = getattr(self, "rewrite_direction", None)
+            rewrite_direction = rewrite_direction_var.get().strip() if rewrite_direction_var else ""
             if getattr(self, "writing_auto_enabled", None) and self.writing_auto_enabled.get():
+                cancel_event = threading.Event()
+                self.automation_cancel_event = cancel_event
                 self._run_async(
-                    lambda: self._run_writing_automation(project_id, section_id, rewrite_mode),
+                    lambda: self._run_single_writing_automation(
+                        project_id,
+                        section_id,
+                        rewrite_mode,
+                        cancel_event,
+                        direction=rewrite_direction,
+                    ),
                     "正在自动生成、审稿、改写并定稿，请稍候...",
                     "自动化写作完成",
                     self._after_writing_automation,
@@ -1245,6 +1270,7 @@ class NovelDesktopUI:
                 selected[1],
                 self.rewrite_mode.get(),
                 [],
+                self.rewrite_direction.get().strip() if getattr(self, "rewrite_direction", None) else "",
             ),
             "正在按意见改写，请稍候...",
             "改写完成",
@@ -1252,8 +1278,7 @@ class NovelDesktopUI:
         )
 
     def _after_writing_task(self) -> None:
-        self.refresh_versions()
-        self.refresh_structure()
+        self._refresh_structure_preserving_selection()
         self.refresh_logs()
 
     def _run_streaming_outline(self, project_id: int) -> dict[str, Any]:
@@ -1380,9 +1405,10 @@ class NovelDesktopUI:
         section_id: int,
         rewrite_mode: str,
         cancel_event: threading.Event | None = None,
+        direction: str = "",
     ) -> dict[str, Any]:
         self._raise_if_automation_cancelled(cancel_event)
-        draft = self.pipeline.write_section_draft(project_id, section_id, "rough")
+        draft = self._run_streaming_draft(project_id, section_id)
         draft_version_id = int(draft["version_id"])
         self._raise_if_automation_cancelled(cancel_event)
         review = self.pipeline.review_section(project_id, section_id, draft_version_id)
@@ -1395,6 +1421,7 @@ class NovelDesktopUI:
             review_version_id,
             rewrite_mode,
             [],
+            direction,
         )
         rewrite_version_id = int(rewrite["version_id"])
         self._raise_if_automation_cancelled(cancel_event)
@@ -1417,6 +1444,21 @@ class NovelDesktopUI:
             "next_message": next_message,
         }
 
+    def _run_single_writing_automation(
+        self,
+        project_id: int,
+        section_id: int,
+        rewrite_mode: str,
+        cancel_event: threading.Event,
+        direction: str = "",
+    ) -> dict[str, Any]:
+        self._configure_llm_retry(cancel_event)
+        try:
+            return self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction)
+        finally:
+            if hasattr(self.services.llm, "configure_retry_until_cancel"):
+                self.services.llm.configure_retry_until_cancel(None, None)
+
     def start_chapter_automation(self) -> None:
         project_id = self._project_required()
         if not project_id:
@@ -1435,6 +1477,8 @@ class NovelDesktopUI:
         chapter_id = int(self.current_chapter_id)
         section_id = int(self.current_section_id)
         rewrite_mode = self.rewrite_mode.get()
+        rewrite_direction_var = getattr(self, "rewrite_direction", None)
+        rewrite_direction = rewrite_direction_var.get().strip() if rewrite_direction_var else ""
         auto_next_chapter = bool(
             getattr(self, "structure_auto_next_chapter_enabled", None)
             and self.structure_auto_next_chapter_enabled.get()
@@ -1447,6 +1491,7 @@ class NovelDesktopUI:
                 rewrite_mode,
                 cancel_event,
                 auto_next_chapter,
+                direction=rewrite_direction,
             ),
             "正在从当前小节开始自动化写作...",
             "章节自动化写作完成",
@@ -1491,6 +1536,7 @@ class NovelDesktopUI:
         rewrite_mode: str,
         cancel_event: threading.Event,
         auto_next_chapter: bool = False,
+        direction: str = "",
     ) -> dict[str, Any]:
         processed: list[int] = []
         chapter_memory_results: list[dict[str, Any]] = []
@@ -1504,7 +1550,7 @@ class NovelDesktopUI:
                     raise ValueError("小节不存在")
                 if int(section["chapter_id"]) != int(chapter_id):
                     break
-                result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event)
+                result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction)
                 processed.append(section_id)
                 next_section = result.get("next_section")
                 if not isinstance(next_section, dict):
@@ -1582,8 +1628,6 @@ class NovelDesktopUI:
 
     def _after_chapter_automation(self, result: dict[str, Any]) -> str:
         self.automation_cancel_event = None
-        self.refresh_versions()
-        self.refresh_structure()
         self.refresh_world_items()
         self.refresh_character_cards()
         self.refresh_location_items()
@@ -1591,6 +1635,8 @@ class NovelDesktopUI:
         last_section_id = result.get("last_section_id") if isinstance(result, dict) else None
         if last_section_id:
             self._select_next_section_for_writing(int(last_section_id))
+        else:
+            self._refresh_structure_preserving_selection()
         processed = result.get("processed", []) if isinstance(result, dict) else []
         stopped = str(result.get("stopped", "") if isinstance(result, dict) else "").strip()
         if stopped:
@@ -1602,9 +1648,7 @@ class NovelDesktopUI:
             raise RuntimeError("用户已中断自动化写作")
 
     def _after_writing_automation(self, result: dict[str, Any]) -> str:
-        self.refresh_versions()
-        self.refresh_structure()
-        self.refresh_logs()
+        self.automation_cancel_event = None
         next_section = result.get("next_section") if isinstance(result, dict) else None
         if isinstance(next_section, dict):
             next_id = int(next_section["id"])
@@ -1613,8 +1657,13 @@ class NovelDesktopUI:
                 and self.structure_auto_next_enabled.get()
             )
             if should_switch and self._select_next_section_for_writing(next_id):
+                self.refresh_logs()
                 return "自动化写作完成，已切换到下一节"
+            self._refresh_structure_preserving_selection()
+            self.refresh_logs()
             return "自动化写作完成，下一节已满足继续条件"
+        self._refresh_structure_preserving_selection()
+        self.refresh_logs()
         message = str(result.get("next_message", "") if isinstance(result, dict) else "").strip()
         return f"自动化写作完成，{message}" if message else "自动化写作完成"
 
@@ -1668,6 +1717,9 @@ class NovelDesktopUI:
     def refresh_versions(self) -> None:
         self.version_list.delete(0, tk.END)
         self.current_version_ids = []
+        self._set_version_text_title(None)
+        if hasattr(self, "version_text"):
+            self.version_text.delete("1.0", tk.END)
         if not self.current_project_id or not self.current_section_id:
             return
         rows = self.store.list_versions(self.current_project_id, section_id=self.current_section_id)
@@ -1676,11 +1728,39 @@ class NovelDesktopUI:
             self.current_version_ids.append(row["id"])
             self.version_list.insert(tk.END, f"{index} | {row['kind']} | {row['status']} | {row['label']}")
 
+    def _set_version_text_title(self, row: dict[str, Any] | None, prefix: str = "版本内容") -> None:
+        title = getattr(self, "version_text_title", None)
+        if title is None:
+            return
+        if not row:
+            title.set("")
+            return
+        version_id = int(row.get("id", 0) or 0)
+        index = self.current_version_ids.index(version_id) + 1 if version_id in self.current_version_ids else "?"
+        title.set(f"{prefix}：{index} | {row.get('kind', '')} | {row.get('status', '')} | {row.get('label', '')}")
+
+    def _refresh_structure_preserving_selection(
+        self,
+        chapter_id: int | None = None,
+        section_id: int | None = None,
+    ) -> None:
+        chapter_id = chapter_id if chapter_id is not None else self.current_chapter_id
+        section_id = section_id if section_id is not None else self.current_section_id
+        self.refresh_structure()
+        if chapter_id and self.select_chapter_by_id(int(chapter_id)):
+            if section_id:
+                self.select_section_by_id(int(section_id))
+            return
+        self.refresh_versions()
+
     def show_selected_version(self) -> None:
         version_id = self._single_selected_version()
         if not version_id:
+            self._set_version_text_title(None)
+            self.version_text.delete("1.0", tk.END)
             return
         row = self.store.get_version(version_id)
+        self._set_version_text_title(row)
         self.version_text.delete("1.0", tk.END)
         self.version_text.insert("1.0", row.get("content", "") if row else "")
 
@@ -1698,8 +1778,30 @@ class NovelDesktopUI:
             tofile=str(selected[1]),
             lineterm="",
         )
+        if hasattr(self, "version_text_title"):
+            self.version_text_title.set(f"版本比较：{selected[0]} ↔ {selected[1]}")
         self.version_text.delete("1.0", tk.END)
         self.version_text.insert("1.0", "\n".join(diff))
+
+    def delete_selected_version(self) -> None:
+        selected = self._selected_versions()
+        if not selected:
+            self._error("请选择要删除的版本")
+            return
+        try:
+            for version_id in selected:
+                self.store.delete_version(version_id)
+        except Exception as exc:  # noqa: BLE001 - UI boundary
+            self._error(str(exc))
+            self.refresh_versions()
+            self.refresh_structure()
+            return
+        self.version_text.delete("1.0", tk.END)
+        self._set_version_text_title(None)
+        self.refresh_versions()
+        self.refresh_structure()
+        self.refresh_logs()
+        self._ok(f"已删除 {len(selected)} 个版本")
 
     def save_llm_settings(self) -> None:
         config = self._llm_config_from_vars()

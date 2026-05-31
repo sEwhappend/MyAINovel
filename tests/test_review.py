@@ -23,6 +23,18 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(request["rewrite_mode"], "只改对白")
         self.assertEqual(request["preserve"], ["保留句"])
 
+    def test_build_rewrite_request_includes_optional_direction(self) -> None:
+        request = build_rewrite_request(
+            {"title": "走廊"},
+            "原文",
+            [],
+            "增强冲突",
+            [],
+            "让女主语气更冷，保留第三段",
+        )
+
+        self.assertEqual(request["rewrite_direction"], "让女主语气更冷，保留第三段")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -302,6 +302,10 @@ class FakeStore:
         self.versions.insert(0, row)
         return version_id
 
+    def delete_version(self, version_id: int) -> None:
+        self.deleted_version_id = version_id
+        self.versions = [version for version in self.versions if version.get("id") != version_id]
+
     def move_chapter(self, project_id: int, chapter_id: int, direction: int) -> None:
         self.moved_chapter = (project_id, chapter_id, direction)
         index = next(index for index, chapter in enumerate(self.chapters) if chapter["id"] == chapter_id)
@@ -365,6 +369,11 @@ class FakePipeline:
         self.calls.append(("draft", project_id, section_id, mode))
         return {"version_id": 101, "content": "粗稿"}
 
+    def write_section_draft_streaming(self, project_id: int, section_id: int, mode: str, on_delta) -> dict[str, object]:
+        self.calls.append(("stream_draft", project_id, section_id, mode))
+        on_delta("粗稿")
+        return {"version_id": 101, "content": "粗稿"}
+
     def review_section(self, project_id: int, section_id: int, version_id: int) -> dict[str, object]:
         self.calls.append(("review", project_id, section_id, version_id))
         return {"version_id": 102, "issues": []}
@@ -377,8 +386,9 @@ class FakePipeline:
         review_id: int,
         rewrite_mode: str,
         preserve: list[str],
+        direction: str = "",
     ) -> dict[str, object]:
-        self.calls.append(("rewrite", project_id, section_id, version_id, review_id, rewrite_mode, preserve))
+        self.calls.append(("rewrite", project_id, section_id, version_id, review_id, rewrite_mode, preserve, direction))
         return {"version_id": 103, "content": "改写"}
 
     def continue_next_section(self, section_id: int) -> dict[str, object]:
@@ -1067,6 +1077,40 @@ class UISmokeTests(unittest.TestCase):
         self.assertEqual(ui.version_text.get("1.0", "end"), "")
         self.assertEqual(messages, ["小节已删除"])
 
+    def test_delete_selected_version_removes_version_and_refreshes_list(self) -> None:
+        store = FakeStore()
+        store.sections = {3: [{"id": 7, "chapter_id": 3, "number": 1, "title": "第一节", "status": "planned"}]}
+        store.versions = [
+            {"id": 31, "project_id": 42, "chapter_id": 3, "section_id": 7, "kind": "draft", "status": "usable", "label": "粗稿", "content": "旧正文"},
+            {"id": 32, "project_id": 42, "chapter_id": 3, "section_id": 7, "kind": "rewrite", "status": "usable", "label": "改写", "content": "新正文"},
+        ]
+        ui = object.__new__(NovelDesktopUI)
+        ui.current_project_id = 42
+        ui.current_chapter_id = 3
+        ui.current_section_id = 7
+        ui.current_version_ids = [31, 32]
+        ui.version_rows = store.versions
+        ui.store = store
+        ui.version_list = FakeListbox()
+        ui.version_list.items = ["1 | draft | usable | 粗稿", "2 | rewrite | usable | 改写"]
+        ui.version_list.selection_set(0)
+        ui.version_text = FakeText("旧正文")
+        ui.refresh_structure = lambda: None
+        ui.refresh_logs = lambda: None
+        messages = []
+        ui._ok = lambda message: messages.append(message)
+        ui._error = lambda message: messages.append(f"error:{message}")
+
+        ui.delete_selected_version()
+
+        self.assertEqual(store.deleted_version_id, 31)
+        self.assertIsNone(store.get_version(31))
+        self.assertIsNotNone(store.get_version(32))
+        self.assertEqual(ui.current_version_ids, [32])
+        self.assertEqual(ui.version_list.items, ["1 | rewrite | usable | 改写"])
+        self.assertEqual(ui.version_text.get("1.0", "end"), "")
+        self.assertEqual(messages, ["已删除 1 个版本"])
+
     def test_writing_automation_runs_draft_review_rewrite_finalize_and_continue(self) -> None:
         store = FakeStore()
         store.sections = {
@@ -1086,21 +1130,41 @@ class UISmokeTests(unittest.TestCase):
         self.assertEqual(
             pipeline.calls,
             [
-                ("draft", 42, 7, "rough"),
+                ("stream_draft", 42, 7, "rough"),
                 ("review", 42, 7, 101),
-                ("rewrite", 42, 7, 101, 102, "增强冲突", []),
+                ("rewrite", 42, 7, 101, 102, "增强冲突", [], ""),
                 ("continue", 7),
             ],
         )
         self.assertEqual(store.finalized_section, (7, 103))
         self.assertEqual(result["next_section"]["id"], 8)
 
+    def test_single_writing_automation_configures_retry_until_finished(self) -> None:
+        store = FakeStore()
+        store.sections = {
+            3: [
+                {"id": 7, "chapter_id": 3, "number": 1, "title": "第一节", "status": "planned"},
+            ]
+        }
+        pipeline = FakePipeline()
+        ui = object.__new__(NovelDesktopUI)
+        ui.store = store
+        ui.pipeline = pipeline
+        ui.services = FakeServices()
+        cancel_event = threading.Event()
+
+        result = ui._run_single_writing_automation(42, 7, "增强冲突", cancel_event)
+
+        self.assertEqual(result["draft_version_id"], 101)
+        self.assertEqual(pipeline.calls[0], ("stream_draft", 42, 7, "rough"))
+        self.assertIs(ui.services.llm.retry_configs[0][0], cancel_event)
+        self.assertEqual(ui.services.llm.retry_configs[-1], (None, None, None))
+
     def test_after_writing_automation_switches_to_next_section_when_enabled(self) -> None:
         ui = object.__new__(NovelDesktopUI)
         ui.structure_auto_next_enabled = FakeVar(True)
         events = []
-        ui.refresh_versions = lambda: events.append("refresh_versions")
-        ui.refresh_structure = lambda: events.append("refresh_structure")
+        ui._refresh_structure_preserving_selection = lambda: events.append("preserve_selection")
         ui.refresh_logs = lambda: events.append("refresh_logs")
         ui._select_next_section_for_writing = lambda section_id: events.append(f"select:{section_id}") or True
 
@@ -1108,9 +1172,57 @@ class UISmokeTests(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["refresh_versions", "refresh_structure", "refresh_logs", "select:8"],
+            ["select:8", "refresh_logs"],
         )
         self.assertEqual(message, "自动化写作完成，已切换到下一节")
+
+    def test_after_writing_automation_preserves_current_selection_when_not_switching(self) -> None:
+        ui = object.__new__(NovelDesktopUI)
+        ui.structure_auto_next_enabled = FakeVar(False)
+        events = []
+        ui._refresh_structure_preserving_selection = lambda: events.append("preserve_selection")
+        ui.refresh_logs = lambda: events.append("refresh_logs")
+        ui._select_next_section_for_writing = lambda section_id: events.append(f"select:{section_id}") or True
+
+        message = ui._after_writing_automation({"next_section": {"id": 8}})
+
+        self.assertEqual(events, ["preserve_selection", "refresh_logs"])
+        self.assertEqual(message, "自动化写作完成，下一节已满足继续条件")
+
+    def test_after_writing_task_preserves_current_selection_after_refresh(self) -> None:
+        ui = object.__new__(NovelDesktopUI)
+        events = []
+        ui._refresh_structure_preserving_selection = lambda: events.append("preserve_selection")
+        ui.refresh_logs = lambda: events.append("refresh_logs")
+
+        ui._after_writing_task()
+
+        self.assertEqual(events, ["preserve_selection", "refresh_logs"])
+
+    def test_version_text_title_describes_selected_version(self) -> None:
+        ui = object.__new__(NovelDesktopUI)
+        ui.current_version_ids = [31, 32]
+        ui.version_text_title = FakeVar("版本内容：未选择版本")
+
+        ui._set_version_text_title({"id": 32, "kind": "rewrite", "status": "usable", "label": "改写"})
+
+        self.assertEqual(ui.version_text_title.get(), "版本内容：2 | rewrite | usable | 改写")
+
+        ui._set_version_text_title(None)
+
+        self.assertEqual(ui.version_text_title.get(), "")
+
+    def test_show_selected_version_clears_right_side_when_no_version_selected(self) -> None:
+        ui = object.__new__(NovelDesktopUI)
+        ui.version_list = FakeListbox()
+        ui.current_version_ids = []
+        ui.version_text_title = FakeVar("旧标题")
+        ui.version_text = FakeText("旧正文")
+
+        ui.show_selected_version()
+
+        self.assertEqual(ui.version_text_title.get(), "")
+        self.assertEqual(ui.version_text.get("1.0", "end"), "")
 
     def test_chapter_automation_starts_from_current_section_and_continues_same_chapter(self) -> None:
         store = FakeStore()
@@ -1131,8 +1243,8 @@ class UISmokeTests(unittest.TestCase):
 
         result = ui._run_chapter_writing_automation(42, 3, 8, "全文改写", cancel_event)
 
-        draft_calls = [call for call in pipeline.calls if call[0] == "draft"]
-        self.assertEqual(draft_calls, [("draft", 42, 8, "rough"), ("draft", 42, 9, "rough")])
+        draft_calls = [call for call in pipeline.calls if call[0] in {"draft", "stream_draft"}]
+        self.assertEqual(draft_calls, [("stream_draft", 42, 8, "rough"), ("stream_draft", 42, 9, "rough")])
         self.assertEqual(result["processed"], [8, 9])
         self.assertEqual(result["last_section_id"], 9)
         self.assertIn("当前章节没有下一节", result["stopped"])
@@ -1160,8 +1272,8 @@ class UISmokeTests(unittest.TestCase):
 
         result = ui._run_chapter_writing_automation(42, 3, 8, "全文改写", cancel_event)
 
-        draft_calls = [call for call in pipeline.calls if call[0] == "draft"]
-        self.assertEqual(draft_calls, [("draft", 42, 8, "rough")])
+        draft_calls = [call for call in pipeline.calls if call[0] in {"draft", "stream_draft"}]
+        self.assertEqual(draft_calls, [("stream_draft", 42, 8, "rough")])
         self.assertEqual(result["processed"], [8])
         self.assertIn("当前章节没有下一节", result["stopped"])
 
@@ -1192,8 +1304,8 @@ class UISmokeTests(unittest.TestCase):
             auto_next_chapter=True,
         )
 
-        draft_calls = [call for call in pipeline.calls if call[0] == "draft"]
-        self.assertEqual(draft_calls, [("draft", 42, 8, "rough"), ("draft", 42, 20, "rough")])
+        draft_calls = [call for call in pipeline.calls if call[0] in {"draft", "stream_draft"}]
+        self.assertEqual(draft_calls, [("stream_draft", 42, 8, "rough"), ("stream_draft", 42, 20, "rough")])
         self.assertEqual(result["processed"], [8, 20])
         self.assertEqual(result["last_section_id"], 20)
         self.assertIn("当前章节没有下一节", result["stopped"])
@@ -1209,8 +1321,8 @@ class UISmokeTests(unittest.TestCase):
         ui._project_required = lambda: 42
         captured = {}
 
-        def fake_run_chapter(project_id, chapter_id, section_id, rewrite_mode, cancel_event, auto_next_chapter=False):
-            captured["args"] = (project_id, chapter_id, section_id, rewrite_mode, auto_next_chapter)
+        def fake_run_chapter(project_id, chapter_id, section_id, rewrite_mode, cancel_event, auto_next_chapter=False, direction=""):
+            captured["args"] = (project_id, chapter_id, section_id, rewrite_mode, auto_next_chapter, direction)
             return {"processed": []}
 
         def fake_run_async(callback, *_args):
@@ -1221,7 +1333,7 @@ class UISmokeTests(unittest.TestCase):
 
         ui.start_chapter_automation()
 
-        self.assertEqual(captured["args"], (42, 3, 8, "全文改写", True))
+        self.assertEqual(captured["args"], (42, 3, 8, "全文改写", True, ""))
 
     def test_chapter_automation_stops_when_cancelled_before_next_step(self) -> None:
         store = FakeStore()
@@ -1961,6 +2073,37 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn('text.setObjectName("ProjectTextInput")', source)
         self.assertIn('text.setPlaceholderText(f"请输入{label}")', source)
 
+    def test_pyside_writing_automation_uses_streaming_draft_and_retry(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        automation_start = source.index("def _run_writing_automation(")
+        automation_end = source.index("def _run_single_writing_automation(", automation_start)
+        automation_source = source[automation_start:automation_end]
+        self.assertIn("draft = self._run_streaming_draft(project_id, section_id)", automation_source)
+        self.assertNotIn("self.pipeline.write_section_draft(project_id, section_id, \"rough\")", automation_source)
+        self.assertIn("def _configure_llm_retry", source)
+        self.assertIn("configure_retry_until_cancel(cancel_event, on_retry)", source)
+        self.assertIn("self.bridge.status.emit", source)
+
+    def test_pyside_writing_refresh_preserves_current_section(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _refresh_structure_preserving_selection", source)
+        self.assertIn("self._refresh_structure_preserving_selection()", source)
+        self.assertIn("chapter_id = chapter_id if chapter_id is not None else self.current_chapter_id", source)
+        self.assertIn("section_id = section_id if section_id is not None else self.current_section_id", source)
+        self.assertIn("self.select_chapter_by_id(int(chapter_id))", source)
+        self.assertIn("self.select_section_by_id(int(section_id))", source)
+
+    def test_pyside_writing_page_has_version_column_titles(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn('self.version_list_title = QLabel("版本列表")', source)
+        self.assertIn('self.version_text_title = QLabel("")', source)
+        self.assertIn("def _set_version_text_title", source)
+        self.assertIn("self.version_text_title.setText(", source)
+        self.assertIn("self.version_list.currentRowChanged.connect(self.show_selected_version)", source)
+        self.assertIn("def _display_version_id", source)
+        self.assertIn("return int(self.current_version_ids[row_index])", source)
+        self.assertIn("版本比较：", source)
+
     def test_pyside_tag_and_character_details_use_dialog_buttons(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         self.assertIn("选择标签/辅助修改", source)
@@ -2275,6 +2418,20 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("self._set_llm_progress(True)", source)
         self.assertGreaterEqual(source.count("self._set_llm_progress(False)"), 2)
 
+    def test_pyside_writing_page_sends_rewrite_direction(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("self.rewrite_direction_input = QLineEdit()", source)
+        self.assertIn("AI 修改方向", source)
+        self.assertIn("self.rewrite_direction_input.text().strip()", source)
+        self.assertIn("direction=direction", source)
+
+    def test_pyside_writing_page_can_delete_selected_version(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn('"删除版本"', source)
+        self.assertIn("def delete_selected_version", source)
+        self.assertIn("self.store.delete_version(version_id)", source)
+        self.assertIn("请选择要删除的版本", source)
+
     def test_pyside_world_edit_dialogs_follow_main_window_size(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         self.assertIn("def _resize_dialog_to_window", source)
@@ -2305,6 +2462,7 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("这是推断节点，尚未写入资料库", source)
         self.assertIn("这是缺失引用节点，资料库中尚无对应条目", source)
         self.assertIn('"created_from": str(node.get("source", ""))', source)
+        self.assertIn("normalize_character_card_details(details)", source)
         self.assertIn('"关系图生成"', source)
         self.assertIn("def _node_pen", source)
         self.assertIn('"character": "#2f80d9"', source)

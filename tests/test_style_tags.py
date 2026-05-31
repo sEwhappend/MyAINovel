@@ -11,6 +11,7 @@ from my_ai_novel.style_tags import (
 from my_ai_novel.world_modules import (
     character_basic_fields_from_details,
     dump_details,
+    normalize_character_card_details,
     update_character_basic_fields,
 )
 
@@ -169,6 +170,31 @@ class StyleTagTests(unittest.TestCase):
         self.assertEqual(fields["identity"], "冒险者")
         self.assertTrue(fields["role_flags"]["protagonist"])
         self.assertTrue(fields["role_flags"]["ensemble_main"])
+
+    def test_character_speech_style_string_gets_profile(self) -> None:
+        details = normalize_character_card_details({"speech_style": "短句"})
+
+        self.assertEqual(details["speech_style"], "短句")
+        self.assertIn("speech_style_profile", details)
+        self.assertEqual(details["speech_style_profile"]["sentence_length"], "")
+        self.assertEqual(details["speech_style_profile"]["tone"], [])
+
+    def test_character_speech_style_object_becomes_summary_and_profile(self) -> None:
+        details = normalize_character_card_details(
+            {
+                "speech_style": {
+                    "summary": "短句，克制",
+                    "sentence_length": "偏短",
+                    "tone": ["冷静", "讽刺"],
+                    "conflict_style": "先反问再沉默",
+                }
+            }
+        )
+
+        self.assertEqual(details["speech_style"], "短句，克制")
+        self.assertEqual(details["speech_style_profile"]["sentence_length"], "偏短")
+        self.assertEqual(details["speech_style_profile"]["tone"], ["冷静", "讽刺"])
+        self.assertEqual(details["speech_style_profile"]["conflict_style"], "先反问再沉默")
 
 
 if __name__ == "__main__":

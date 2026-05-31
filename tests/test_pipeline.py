@@ -320,6 +320,32 @@ class InspectingFakeLLM(FakeLLM):
         return super().chat_json(agent_name, messages, schema_hint)
 
 
+class CharacterWorldItemFakeLLM(InspectingFakeLLM):
+    def chat_json(self, agent_name, messages, schema_hint=None):
+        self.calls.append({"agent_name": agent_name, "messages": messages, "schema_hint": schema_hint})
+        if agent_name == "world_item_creator":
+            return {
+                "kind": "character",
+                "name": "顾眠",
+                "summary": "用冷静口吻协助调查的同伴。",
+                "details": {
+                    "identity": "旧宅事件见证者",
+                    "personality": "冷静谨慎",
+                    "motivation": "隐藏自己曾经到过旧宅",
+                    "speech_style": {
+                        "summary": "礼貌短句，刻意回避细节",
+                        "sentence_length": "偏短",
+                        "tone": ["礼貌", "疏离"],
+                    },
+                    "role_flags": {"supporting": True},
+                    "modules": {},
+                },
+                "tags": "AI创建",
+                "status": "candidate",
+            }
+        return super().chat_json(agent_name, messages, schema_hint)
+
+
 class LegacySplitFakeLLM(FakeLLM):
     def chat_json(self, agent_name, messages, schema_hint=None):
         if agent_name == "outline_splitter":
@@ -486,23 +512,29 @@ class PipelineTests(unittest.TestCase):
         self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
 
     def test_outline_split_draft_review_rewrite_flow(self) -> None:
-        outline = self.pipeline.expand_global_concept(self.project_id)
-        split = self.pipeline.confirm_outline_split(self.project_id, outline["version_id"])
+        llm = InspectingFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+        outline = pipeline.expand_global_concept(self.project_id)
+        split = pipeline.confirm_outline_split(self.project_id, outline["version_id"])
         self.assertEqual(split, {"chapters": 1, "sections": 1, "world_items": 3})
         chapter = self.store.list_chapters(self.project_id)[0]
         section = self.store.list_sections(chapter["id"])[0]
-        draft = self.pipeline.write_section_draft(self.project_id, section["id"])
+        draft = pipeline.write_section_draft(self.project_id, section["id"])
         self.assertEqual(self.store.get_section(section["id"])["status"], "generated")
-        review = self.pipeline.review_section(self.project_id, section["id"], draft["version_id"])
-        rewrite = self.pipeline.rewrite_section(
+        review = pipeline.review_section(self.project_id, section["id"], draft["version_id"])
+        rewrite = pipeline.rewrite_section(
             self.project_id,
             section["id"],
             draft["version_id"],
             review["version_id"],
             "压缩",
             [],
+            "保留第一段，压缩解释",
         )
         self.assertEqual(rewrite["content"], "改写正文")
+        rewrite_call = next(call for call in llm.calls if call.get("agent_name") == "rewriter")
+        payload = json.loads(rewrite_call["messages"][-1]["content"].split("\n", 1)[1])
+        self.assertEqual(payload["rewrite_direction"], "保留第一段，压缩解释")
 
     def test_write_section_draft_streaming_saves_draft_and_reports_chunks(self) -> None:
         pipeline = NovelPipeline(self.store, StreamingFakeLLM())
@@ -653,6 +685,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(details["identity"], "调查员")
         self.assertTrue(details["role_flags"]["protagonist"])
         self.assertEqual(details["modules"]["growth"]["start"], "不信任他人")
+        self.assertIn("speech_style_profile", details)
+        self.assertEqual(details["speech_style_profile"]["tone"], [])
         self.assertEqual(llm.calls[0]["agent_name"], "main_character_generator")
 
     def test_confirm_outline_split_calls_splitter_for_expanded_outline(self) -> None:
@@ -1038,6 +1072,8 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("第1章：雨夜", names_by_kind["timeline_event"])
         self.assertNotIn("第1章第1节：十点", names_by_kind["timeline_event"])
         self.assertEqual(names_by_kind["forbidden"], ["提前揭示真相"])
+        character_details = json.loads(next(item["details_json"] for item in items if item["kind"] == "character"))
+        self.assertIn("speech_style_profile", character_details)
 
     def test_timeline_event_candidates_preserve_ordering_fields(self) -> None:
         metadata = {
@@ -1112,6 +1148,8 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.confirm_outline_split(self.project_id, version_id)
 
         world_items = self.store.list_world_items(self.project_id)
+        lin_details = json.loads(next(item["details_json"] for item in world_items if item["kind"] == "character" and item["name"] == "林砚"))
+        self.assertIn("speech_style_profile", lin_details)
         character_graph = build_character_graph(world_items)
         event_graph = build_event_graph(world_items)
         self.assertTrue(
@@ -1181,6 +1219,12 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("chapter.story_time 和 section.story_time 只是章节/小节自身的时间标记", splitter_prompt)
         self.assertIn("details.relationships", splitter_prompt)
         self.assertIn("details.participants", splitter_prompt)
+        self.assertIn("speech_style_profile", splitter_prompt)
+        self.assertIn("speech_style 是给 UI 显示的一句话说话风格摘要", splitter_prompt)
+        self.assertIn("speech_style_profile", AGENT_SYSTEM_PROMPTS["world_item_creator"])
+        self.assertIn("speech_style_profile", AGENT_SYSTEM_PROMPTS["tagged_character_creator"])
+        self.assertIn("speech_style_profile", AGENT_SYSTEM_PROMPTS["main_character_generator"])
+        self.assertIn("rewrite_direction", AGENT_SYSTEM_PROMPTS["rewriter"])
         section_hint = SCHEMA_HINTS["outline_splitter"]["chapters"][0]["sections"][0]
         for field in (
             "section_focus",
@@ -1196,8 +1240,13 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("time_text", world_item_hint)
         self.assertIn("sequence", world_item_hint)
         self.assertIn("relationships", world_item_hint)
+        self.assertIn("speech_style", world_item_hint)
+        self.assertIn("speech_style_profile", world_item_hint)
         self.assertIn("participants", world_item_hint)
         self.assertIn("graph_links", world_item_hint)
+        self.assertIn("speech_style_profile", SCHEMA_HINTS["world_item_creator"]["details"])
+        self.assertIn("speech_style_profile", SCHEMA_HINTS["tagged_character_creator"]["details"])
+        self.assertIn("speech_style_profile", SCHEMA_HINTS["main_character_generator"]["details"])
 
     def test_draft_and_reviewer_prompts_guard_against_low_density_summaries(self) -> None:
         draft_prompt = AGENT_SYSTEM_PROMPTS["draft_writer"]
@@ -1480,6 +1529,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(draft["tags"], "主角,AI补全")
         self.assertEqual(draft["details"]["identity"], "调查者")
         self.assertEqual(draft["details"]["motivation"], "寻找真相")
+        self.assertIn("speech_style_profile", draft["details"])
         self.assertEqual(draft["details"]["source"], "ai_enriched")
         item = self.store.get_world_item(self.project_id, item_id)
         self.assertEqual(item["summary"], "原始摘要")
@@ -1534,6 +1584,19 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(payload["current_outline"]["content"], "旧宅故事从雨夜开始。")
         self.assertNotIn("metadata", payload["current_outline"])
         self.assertNotIn("project_writing_constraints", payload)
+
+    def test_generate_world_item_character_normalizes_speech_style_profile(self) -> None:
+        llm = CharacterWorldItemFakeLLM()
+        pipeline = NovelPipeline(self.store, llm)
+
+        result = pipeline.generate_world_item(self.project_id, "character")
+
+        self.assertEqual(result["world_item"]["kind"], "character")
+        details = json.loads(result["world_item"]["details_json"])
+        self.assertEqual(details["speech_style"], "礼貌短句，刻意回避细节")
+        self.assertEqual(details["speech_style_profile"]["sentence_length"], "偏短")
+        self.assertEqual(details["speech_style_profile"]["tone"], ["礼貌", "疏离"])
+        self.assertEqual(llm.calls[0]["agent_name"], "world_item_creator")
 
     def test_generate_world_item_uses_compact_context_to_reduce_timeouts(self) -> None:
         llm = InspectingFakeLLM()
@@ -1611,6 +1674,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("weak_to_strong", details["modules"])
         self.assertIn("skill_system", details["modules"])
         self.assertEqual(details["identity"], "魔法学院转学生")
+        self.assertIn("speech_style_profile", details)
         self.assertIn("标签化生成", result["world_item"]["tags"])
         self.assertEqual(llm.calls[0]["agent_name"], "tagged_character_creator")
         user_content = llm.calls[0]["messages"][-1]["content"]
@@ -1640,6 +1704,7 @@ class PipelineTests(unittest.TestCase):
         details = json.loads(result["world_item"]["details_json"])
         self.assertTrue(details["role_flags"]["supporting"])
         self.assertIn("ts", details["modules"])
+        self.assertIn("speech_style_profile", details)
         self.assertSystemRuleBeforeFirstUser(llm.stream_messages, "流式输出时仍只输出这个 JSON object")
 
     def test_write_chapter_memory_upserts_candidates_from_finalized_sections(self) -> None:

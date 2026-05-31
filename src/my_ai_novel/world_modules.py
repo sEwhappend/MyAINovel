@@ -6,6 +6,27 @@ from typing import Any
 
 CHARACTER_BASIC_FIELDS = ("identity", "personality", "motivation", "speech_style")
 CHARACTER_ROLE_FLAGS = ("protagonist", "pov", "ensemble_main", "supporting")
+SPEECH_STYLE_PROFILE_FIELDS = (
+    "sentence_length",
+    "formality",
+    "tone",
+    "addressing_habits",
+    "catchphrases",
+    "taboo_words",
+    "emotion_leak",
+    "information_style",
+    "conflict_style",
+    "dialogue_examples",
+    "anti_voice_rules",
+)
+SPEECH_STYLE_PROFILE_LIST_FIELDS = {
+    "tone",
+    "addressing_habits",
+    "catchphrases",
+    "taboo_words",
+    "dialogue_examples",
+    "anti_voice_rules",
+}
 
 
 def load_details(raw: Any) -> dict[str, Any]:
@@ -26,7 +47,66 @@ def dump_details(details: dict[str, Any]) -> str:
     return json.dumps(details, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def normalize_character_details(details: Any) -> dict[str, Any]:
+def default_speech_style_profile() -> dict[str, Any]:
+    return {
+        field: [] if field in SPEECH_STYLE_PROFILE_LIST_FIELDS else ""
+        for field in SPEECH_STYLE_PROFILE_FIELDS
+    }
+
+
+def _text_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def normalize_speech_style_profile(value: Any) -> dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    profile = default_speech_style_profile()
+    for field in SPEECH_STYLE_PROFILE_FIELDS:
+        if field in SPEECH_STYLE_PROFILE_LIST_FIELDS:
+            profile[field] = _text_list(raw.get(field))
+        else:
+            profile[field] = str(raw.get(field, "") or "").strip()
+    for key, extra_value in raw.items():
+        if key not in profile:
+            profile[key] = extra_value
+    return profile
+
+
+def _speech_style_summary(value: Any, profile: dict[str, Any] | None = None) -> str:
+    if isinstance(value, dict):
+        for key in ("summary", "description", "style", "voice", "speech_style"):
+            text = str(value.get(key, "") or "").strip()
+            if text:
+                return text
+        parts: list[str] = []
+        for key in ("sentence_length", "formality", "emotion_leak", "information_style", "conflict_style"):
+            text = str(value.get(key, "") or "").strip()
+            if text:
+                parts.append(text)
+        for key in ("tone", "catchphrases"):
+            parts.extend(_text_list(value.get(key)))
+        return "；".join(parts[:4])
+    if isinstance(value, list):
+        return "；".join(_text_list(value))
+    text = str(value or "").strip()
+    if text:
+        return text
+    if profile:
+        parts = []
+        for key in ("sentence_length", "formality", "emotion_leak", "information_style", "conflict_style"):
+            item = str(profile.get(key, "") or "").strip()
+            if item:
+                parts.append(item)
+        for key in ("tone", "catchphrases"):
+            parts.extend(_text_list(profile.get(key)))
+        return "；".join(parts[:4])
+    return ""
+
+
+def normalize_character_card_details(details: Any) -> dict[str, Any]:
     data = load_details(details)
     modules = data.get("modules")
     if not isinstance(modules, dict):
@@ -36,7 +116,20 @@ def normalize_character_details(details: Any) -> dict[str, Any]:
         data["role_flags"] = {}
     for flag in CHARACTER_ROLE_FLAGS:
         data["role_flags"][flag] = bool(data["role_flags"].get(flag, False))
+    speech_style_value = data.get("speech_style")
+    profile_value = data.get("speech_style_profile")
+    if isinstance(speech_style_value, dict):
+        profile_source = {**speech_style_value, **(profile_value if isinstance(profile_value, dict) else {})}
+    else:
+        profile_source = profile_value if isinstance(profile_value, dict) else {}
+    profile = normalize_speech_style_profile(profile_source)
+    data["speech_style"] = _speech_style_summary(speech_style_value, profile)
+    data["speech_style_profile"] = profile
     return data
+
+
+def normalize_character_details(details: Any) -> dict[str, Any]:
+    return normalize_character_card_details(details)
 
 
 def character_basic_fields_from_details(details: Any) -> dict[str, Any]:

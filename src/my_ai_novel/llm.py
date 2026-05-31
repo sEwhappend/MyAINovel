@@ -152,23 +152,43 @@ class LLMClient:
         on_delta: Any,
         max_tokens: int | None = None,
     ) -> str:
-        if self.api_type != "responses":
-            return self._chat_completions_stream_text(model, messages, on_delta, max_tokens)
-        if not self.base_url:
-            raise LLMError("未配置 base_url")
-        if not self.config.get("api_key"):
-            raise LLMError("未配置 api_key")
-        if not model:
-            raise LLMError("未配置模型")
-        payload = self._responses_payload(model, messages, max_tokens)
-        payload["stream"] = True
-        chunks: list[str] = []
-        for event in self._post_sse("/responses", payload):
-            delta = self._extract_responses_delta(event)
-            if delta:
-                chunks.append(delta)
+        attempt = 0
+        while True:
+            emitted = False
+
+            def forward_delta(delta: str) -> None:
+                nonlocal emitted
+                if delta:
+                    emitted = True
                 on_delta(delta)
-        return "".join(chunks)
+
+            try:
+                if self.api_type != "responses":
+                    return self._chat_completions_stream_text(model, messages, forward_delta, max_tokens)
+                if not self.base_url:
+                    raise LLMError("未配置 base_url")
+                if not self.config.get("api_key"):
+                    raise LLMError("未配置 api_key")
+                if not model:
+                    raise LLMError("未配置模型")
+                payload = self._responses_payload(model, messages, max_tokens)
+                payload["stream"] = True
+                chunks: list[str] = []
+                for event in self._post_sse("/responses", payload):
+                    delta = self._extract_responses_delta(event)
+                    if delta:
+                        chunks.append(delta)
+                        forward_delta(delta)
+                return "".join(chunks)
+            except LLMError as exc:
+                if emitted or not self._should_retry_until_cancel(exc):
+                    raise
+                attempt += 1
+                delay = self._retry_delay(attempt, exc)
+                if self.retry_callback:
+                    self.retry_callback(attempt, delay, str(exc))
+                if self.retry_cancel_event is None or self.retry_cancel_event.wait(delay):
+                    raise LLMError("用户已中断自动化写作") from exc
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         model = self.config.get("embedding_model")
@@ -713,7 +733,7 @@ class LLMClient:
             return True
         if "读取响应超时" in text or "连接失败" in text:
             return True
-        retryable_codes = ("401", "403", "429", "499", "500", "502", "503", "504")
+        retryable_codes = ("401", "403", "429", "499", "500", "502", "503", "504", "524")
         return any(f"HTTP {code}" in text for code in retryable_codes)
 
     def _retry_delay(self, attempt: int, exc: BaseException | None = None) -> int:

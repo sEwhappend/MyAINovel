@@ -43,6 +43,7 @@ from .ui_logic import (
 from .world_modules import (
     character_basic_fields_from_details,
     dump_details,
+    normalize_character_card_details,
     update_character_basic_fields,
 )
 
@@ -416,6 +417,7 @@ if PYSIDE6_AVAILABLE:
         success = Signal(str, object, object)
         error = Signal(str)
         stream = Signal(str, str)
+        status = Signal(str)
 
 
     class RelationGraphView(QGraphicsView):
@@ -1844,6 +1846,7 @@ if PYSIDE6_AVAILABLE:
             self.bridge.success.connect(self._complete_async_success)
             self.bridge.error.connect(self._complete_async_error)
             self.bridge.stream.connect(self._append_streaming_target)
+            self.bridge.status.connect(self._ok)
             self.window = QMainWindow()
             self.window.setWindowTitle(title)
             self.window.setWindowFlags(self.window.windowFlags() | Qt.WindowType.FramelessWindowHint)
@@ -2305,6 +2308,7 @@ if PYSIDE6_AVAILABLE:
                 ("取消定稿", self.unfinalize_current_section),
                 ("继续下一节", self.continue_next_section),
                 ("比较版本", self.diff_versions),
+                ("删除版本", self.delete_selected_version),
                 ("总结本章并更新资料库", self.write_current_chapter_memory),
             ]:
                 actions.addWidget(self._button(text, callback))
@@ -2313,20 +2317,38 @@ if PYSIDE6_AVAILABLE:
             self.writing_auto_enabled = QCheckBox("自动化：正文 -> 审稿 -> 改写 -> 定稿 -> 继续下一节")
             self.rewrite_mode = QComboBox()
             self.rewrite_mode.addItems(["整体改写", "只改对白", "只改心理", "只改结尾", "增强冲突"])
+            self.rewrite_direction_input = QLineEdit()
+            self.rewrite_direction_input.setPlaceholderText("可选：本次 AI 修改方向，例如语气更冷、加强冲突、保留第三段")
             options.addWidget(self.writing_auto_enabled)
             options.addWidget(QLabel("改写模式"))
             options.addWidget(self.rewrite_mode)
+            options.addWidget(QLabel("AI 修改方向"))
+            options.addWidget(self.rewrite_direction_input, 1)
             options.addStretch(1)
             layout.addLayout(options)
             body = QSplitter(Qt.Orientation.Horizontal)
+            left_panel = QWidget()
+            left_layout = QVBoxLayout(left_panel)
+            left_layout.setContentsMargins(0, 0, 0, 0)
+            self.version_list_title = QLabel("版本列表")
+            self.version_list_title.setObjectName("PanelTitle")
+            left_layout.addWidget(self.version_list_title)
             self.version_list = QListWidget()
             self.version_list.setObjectName("SectionList")
             self.version_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-            self.version_list.currentRowChanged.connect(lambda _row: self.show_selected_version())
+            self.version_list.currentRowChanged.connect(self.show_selected_version)
+            left_layout.addWidget(self.version_list)
+            right_panel = QWidget()
+            right_layout = QVBoxLayout(right_panel)
+            right_layout.setContentsMargins(0, 0, 0, 0)
+            self.version_text_title = QLabel("")
+            self.version_text_title.setObjectName("PanelTitle")
+            right_layout.addWidget(self.version_text_title)
             self.version_text = QTextEdit()
             self.version_text.setObjectName("WritingEditor")
-            body.addWidget(self.version_list)
-            body.addWidget(self.version_text)
+            right_layout.addWidget(self.version_text)
+            body.addWidget(left_panel)
+            body.addWidget(right_panel)
             layout.addWidget(body, 2)
             layout.addWidget(QLabel("当前流式生成内容"))
             self.current_generation_text = QTextEdit()
@@ -2798,6 +2820,8 @@ if PYSIDE6_AVAILABLE:
                 "graph_node_id": str(node.get("id", "")),
                 "evidence": node.get("evidence", []),
             }
+            if kind == "character":
+                details = normalize_character_card_details(details)
             item_id = self.store.save_world_item(
                 project_id,
                 {
@@ -3816,8 +3840,17 @@ if PYSIDE6_AVAILABLE:
                 return
             section_id = self.current_section_id
             if self.writing_auto_enabled.isChecked():
+                direction = self.rewrite_direction_input.text().strip()
+                cancel_event = threading.Event()
+                self.automation_cancel_event = cancel_event
                 self._run_async(
-                    lambda: self._run_writing_automation(project_id, section_id, self.rewrite_mode.currentText()),
+                    lambda: self._run_single_writing_automation(
+                        project_id,
+                        section_id,
+                        self.rewrite_mode.currentText(),
+                        cancel_event,
+                        direction=direction,
+                    ),
                     "正在自动生成、审稿、改写并定稿，请稍候...",
                     "自动化写作完成",
                     self._after_writing_automation,
@@ -3855,6 +3888,7 @@ if PYSIDE6_AVAILABLE:
                     selected[1],
                     self.rewrite_mode.currentText(),
                     [],
+                    self.rewrite_direction_input.text().strip(),
                 ),
                 "正在按意见改写，请稍候...",
                 "改写完成",
@@ -3862,8 +3896,7 @@ if PYSIDE6_AVAILABLE:
             )
 
         def _after_writing_task(self) -> None:
-            self.refresh_versions()
-            self.refresh_structure()
+            self._refresh_structure_preserving_selection()
             self.refresh_logs()
 
         def _run_streaming_outline(self, project_id: int) -> dict[str, Any]:
@@ -3978,15 +4011,16 @@ if PYSIDE6_AVAILABLE:
             section_id: int,
             rewrite_mode: str,
             cancel_event: threading.Event | None = None,
+            direction: str = "",
         ) -> dict[str, Any]:
             self._raise_if_automation_cancelled(cancel_event)
-            draft = self.pipeline.write_section_draft(project_id, section_id, "rough")
+            draft = self._run_streaming_draft(project_id, section_id)
             draft_version_id = int(draft["version_id"])
             self._raise_if_automation_cancelled(cancel_event)
             review = self.pipeline.review_section(project_id, section_id, draft_version_id)
             review_version_id = int(review["version_id"])
             self._raise_if_automation_cancelled(cancel_event)
-            rewrite = self.pipeline.rewrite_section(project_id, section_id, draft_version_id, review_version_id, rewrite_mode, [])
+            rewrite = self.pipeline.rewrite_section(project_id, section_id, draft_version_id, review_version_id, rewrite_mode, [], direction)
             rewrite_version_id = int(rewrite["version_id"])
             self._raise_if_automation_cancelled(cancel_event)
             self.store.finalize_section(section_id, rewrite_version_id)
@@ -4003,6 +4037,21 @@ if PYSIDE6_AVAILABLE:
                 "next_section": next_section,
                 "next_message": next_message,
             }
+
+        def _run_single_writing_automation(
+            self,
+            project_id: int,
+            section_id: int,
+            rewrite_mode: str,
+            cancel_event: threading.Event,
+            direction: str = "",
+        ) -> dict[str, Any]:
+            self._configure_llm_retry(cancel_event)
+            try:
+                return self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction)
+            finally:
+                if hasattr(self.services.llm, "configure_retry_until_cancel"):
+                    self.services.llm.configure_retry_until_cancel(None, None)
 
         def start_chapter_automation(self) -> None:
             project_id = self._project_required()
@@ -4022,6 +4071,7 @@ if PYSIDE6_AVAILABLE:
                     self.rewrite_mode.currentText(),
                     cancel_event,
                     self.structure_auto_next_chapter_enabled.isChecked(),
+                    direction=self.rewrite_direction_input.text().strip(),
                 ),
                 "正在从当前小节开始自动化写作...",
                 "章节自动化写作完成",
@@ -4043,31 +4093,37 @@ if PYSIDE6_AVAILABLE:
             rewrite_mode: str,
             cancel_event: threading.Event,
             auto_next_chapter: bool = False,
+            direction: str = "",
         ) -> dict[str, Any]:
             processed: list[int] = []
             section_id = start_section_id
-            while True:
-                self._raise_if_automation_cancelled(cancel_event)
-                section = self.store.get_section(section_id)
-                if not section or int(section["chapter_id"]) != int(chapter_id):
-                    break
-                result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event)
-                processed.append(section_id)
-                next_section = result.get("next_section")
-                if isinstance(next_section, dict) and int(next_section.get("chapter_id", chapter_id)) == int(chapter_id):
-                    section_id = int(next_section["id"])
-                    continue
-                try:
-                    self.pipeline.write_chapter_memory(project_id, chapter_id)
-                except Exception:
-                    pass
-                if auto_next_chapter:
-                    next_chapter_section = self._first_section_in_next_chapter(project_id, chapter_id)
-                    if next_chapter_section is not None:
-                        chapter_id = int(next_chapter_section["chapter_id"])
-                        section_id = int(next_chapter_section["id"])
+            self._configure_llm_retry(cancel_event)
+            try:
+                while True:
+                    self._raise_if_automation_cancelled(cancel_event)
+                    section = self.store.get_section(section_id)
+                    if not section or int(section["chapter_id"]) != int(chapter_id):
+                        break
+                    result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction)
+                    processed.append(section_id)
+                    next_section = result.get("next_section")
+                    if isinstance(next_section, dict) and int(next_section.get("chapter_id", chapter_id)) == int(chapter_id):
+                        section_id = int(next_section["id"])
                         continue
-                return {"processed": processed, "last_section_id": section_id, "next_section": None}
+                    try:
+                        self.pipeline.write_chapter_memory(project_id, chapter_id)
+                    except Exception:
+                        pass
+                    if auto_next_chapter:
+                        next_chapter_section = self._first_section_in_next_chapter(project_id, chapter_id)
+                        if next_chapter_section is not None:
+                            chapter_id = int(next_chapter_section["chapter_id"])
+                            section_id = int(next_chapter_section["id"])
+                            continue
+                    return {"processed": processed, "last_section_id": section_id, "next_section": None}
+            finally:
+                if hasattr(self.services.llm, "configure_retry_until_cancel"):
+                    self.services.llm.configure_retry_until_cancel(None, None)
             return {"processed": processed, "last_section_id": section_id, "next_section": None}
 
         def _first_section_in_next_chapter(self, project_id: int, chapter_id: int) -> dict[str, Any] | None:
@@ -4083,15 +4139,24 @@ if PYSIDE6_AVAILABLE:
 
         def _after_chapter_automation(self, result: dict[str, Any]) -> str:
             self.automation_cancel_event = None
-            self.refresh_versions()
-            self.refresh_structure()
             self.refresh_world_items()
             self.refresh_logs()
             last_section_id = result.get("last_section_id") if isinstance(result, dict) else None
             if last_section_id:
                 self._select_next_section_for_writing(int(last_section_id))
+            else:
+                self._refresh_structure_preserving_selection()
             processed = result.get("processed", []) if isinstance(result, dict) else []
             return f"章节自动化写作完成，已处理 {len(processed)} 节"
+
+        def _configure_llm_retry(self, cancel_event: threading.Event) -> None:
+            if not hasattr(self.services.llm, "configure_retry_until_cancel"):
+                return
+
+            def on_retry(attempt: int, delay: int, error: str) -> None:
+                self.bridge.status.emit(f"API 调用失败，{delay} 秒后第 {attempt + 1} 次重试：{error}")
+
+            self.services.llm.configure_retry_until_cancel(cancel_event, on_retry)
 
         def write_current_chapter_memory(self) -> None:
             project_id = self._project_required()
@@ -4152,13 +4217,14 @@ if PYSIDE6_AVAILABLE:
             return True
 
         def _after_writing_automation(self, result: dict[str, Any]) -> str:
-            self.refresh_versions()
-            self.refresh_structure()
-            self.refresh_logs()
+            self.automation_cancel_event = None
             next_section = result.get("next_section") if isinstance(result, dict) else None
             if isinstance(next_section, dict) and self.structure_auto_next_enabled.isChecked():
                 self._select_next_section_for_writing(int(next_section["id"]))
+                self.refresh_logs()
                 return "自动化写作完成，已切换到下一节"
+            self._refresh_structure_preserving_selection()
+            self.refresh_logs()
             message = str(result.get("next_message", "") if isinstance(result, dict) else "").strip()
             return f"自动化写作完成，{message}" if message else "自动化写作完成"
 
@@ -4170,6 +4236,9 @@ if PYSIDE6_AVAILABLE:
             self.version_list.clear()
             self.current_version_ids = []
             self.version_rows = []
+            self._set_version_text_title(None)
+            if hasattr(self, "version_text"):
+                self.version_text.clear()
             if not self.current_project_id or not self.current_section_id:
                 return
             self.version_rows = self.store.list_versions(self.current_project_id, section_id=self.current_section_id)
@@ -4179,11 +4248,48 @@ if PYSIDE6_AVAILABLE:
                 item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
                 self.version_list.addItem(item)
 
-        def show_selected_version(self) -> None:
-            version_id = self._single_selected_version()
+        def _set_version_text_title(self, row: dict[str, Any] | None, prefix: str = "版本内容") -> None:
+            if not hasattr(self, "version_text_title"):
+                return
+            if not row:
+                self.version_text_title.setText("")
+                return
+            version_id = int(row.get("id", 0) or 0)
+            index = self.current_version_ids.index(version_id) + 1 if version_id in self.current_version_ids else "?"
+            self.version_text_title.setText(
+                f"{prefix}：{index} | {row.get('kind', '')} | {row.get('status', '')} | {row.get('label', '')}"
+            )
+
+        def _refresh_structure_preserving_selection(
+            self,
+            chapter_id: int | None = None,
+            section_id: int | None = None,
+        ) -> None:
+            chapter_id = chapter_id if chapter_id is not None else self.current_chapter_id
+            section_id = section_id if section_id is not None else self.current_section_id
+            self.refresh_structure()
+            if chapter_id and self.select_chapter_by_id(int(chapter_id)):
+                if section_id:
+                    self.select_section_by_id(int(section_id))
+                return
+            self.refresh_versions()
+
+        def _display_version_id(self, row_index: int | None = None) -> int | None:
+            if row_index is not None and 0 <= row_index < len(self.current_version_ids):
+                return int(self.current_version_ids[row_index])
+            item = self.version_list.currentItem()
+            if item is not None:
+                return int(item.data(Qt.ItemDataRole.UserRole))
+            return self._single_selected_version()
+
+        def show_selected_version(self, row_index: int | None = None) -> None:
+            version_id = self._display_version_id(row_index)
             if not version_id:
+                self._set_version_text_title(None)
+                self.version_text.clear()
                 return
             row = self.store.get_version(version_id)
+            self._set_version_text_title(row)
             self.version_text.setPlainText(row.get("content", "") if row else "")
 
         def diff_versions(self) -> None:
@@ -4200,7 +4306,29 @@ if PYSIDE6_AVAILABLE:
                 tofile=str(selected[1]),
                 lineterm="",
             )
+            if hasattr(self, "version_text_title"):
+                self.version_text_title.setText(f"版本比较：{selected[0]} ↔ {selected[1]}")
             self.version_text.setPlainText("\n".join(diff))
+
+        def delete_selected_version(self) -> None:
+            selected = self._selected_versions()
+            if not selected:
+                self._error("请选择要删除的版本")
+                return
+            try:
+                for version_id in selected:
+                    self.store.delete_version(version_id)
+            except Exception as exc:  # noqa: BLE001 - UI boundary
+                self._error(str(exc))
+                self.refresh_versions()
+                self.refresh_structure()
+                return
+            self.version_text.clear()
+            self._set_version_text_title(None)
+            self.refresh_versions()
+            self.refresh_structure()
+            self.refresh_logs()
+            self._ok(f"已删除 {len(selected)} 个版本")
 
         def save_llm_settings(self) -> None:
             config = self._llm_config_from_vars()

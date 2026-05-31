@@ -49,8 +49,9 @@ def build_rewrite_request(
     issues: list[dict[str, Any]],
     mode: str,
     preserve: list[str],
+    direction: str = "",
 ) -> dict[str, Any]:
-    return {
+    request = {
         "section": section,
         "draft": draft,
         "issues": issues,
@@ -63,3 +64,6 @@ def build_rewrite_request(
             "输出 JSON object",
         ],
     }
+    if str(direction or "").strip():
+        request["rewrite_direction"] = str(direction or "").strip()
+    return request

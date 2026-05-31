@@ -11,7 +11,11 @@ from .retrieval import retrieve_context
 from .review import build_rewrite_request, validate_review_issues
 from .storage import NovelStore
 from .style_tags import list_style_tag_catalog
-from .world_modules import character_basic_fields_from_details, merge_module_patches
+from .world_modules import (
+    character_basic_fields_from_details,
+    merge_module_patches,
+    normalize_character_card_details,
+)
 
 
 DEFAULT_SECTION_TARGET_WORDS = 1200
@@ -567,12 +571,15 @@ class NovelPipeline:
         if str(direction or "").strip():
             payload["enrich_direction"] = str(direction or "").strip()
         result = self._call("world_item_enricher", payload)
+        details = self._merged_details(item.get("details_json"), result.get("details"))
+        if item["kind"] == "character":
+            details = normalize_character_card_details(details)
         enriched = {
             "id": item_id,
             "kind": item["kind"],
             "name": str(result.get("name", item.get("name", "")) or "").strip() or item["name"],
             "summary": result.get("summary", item.get("summary", "")),
-            "details": self._merged_details(item.get("details_json"), result.get("details")),
+            "details": details,
             "tags": self._merge_csv(item.get("tags", ""), result.get("tags", "AI补全")),
             "status": result.get("status") or item.get("status") or "active",
         }
@@ -888,7 +895,7 @@ class NovelPipeline:
             details["relationships"] = []
         for key in ("identity", "personality", "motivation", "speech_style"):
             details[key] = str(details.get(key, "") or "").strip()
-        return details
+        return normalize_character_card_details(details)
 
     def _world_item_creation_project_context(self, project: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -915,11 +922,7 @@ class NovelPipeline:
         project = self._require(self.store.get_project(project_id), "project")
         result = self._call("main_character_generator", {"project": project})
         details = result.get("details") if isinstance(result.get("details"), dict) else {}
-        details = character_basic_fields_from_details(details) | {
-            key: value
-            for key, value in details.items()
-            if key not in {"identity", "personality", "motivation", "speech_style", "role_flags"}
-        }
+        details = normalize_character_card_details(details)
         role_flags = details.get("role_flags")
         if not isinstance(role_flags, dict) or not any(role_flags.values()):
             details["role_flags"] = {
@@ -1148,6 +1151,7 @@ class NovelPipeline:
         review_id: int,
         rewrite_mode: str,
         preserve: list[str] | None = None,
+        direction: str = "",
     ) -> dict[str, Any]:
         section = self._require(self.store.get_section(section_id), "section")
         if section.get("status") == "finalized":
@@ -1157,7 +1161,7 @@ class NovelPipeline:
         review = self._require(self.store.get_version(review_id), "review")
         review_data = self._loads(review.get("content"))
         issues = validate_review_issues(review_data)
-        request = build_rewrite_request(section, draft["content"], issues, rewrite_mode, preserve or [])
+        request = build_rewrite_request(section, draft["content"], issues, rewrite_mode, preserve or [], direction)
         request["project"] = project
         draft_metadata = self._loads(draft.get("metadata_json"))
         request["retrieved_world_items"] = draft_metadata.get("retrieved_world_items", [])
@@ -1890,6 +1894,8 @@ class NovelPipeline:
                     normalized[key] = value
         if kind == "timeline_event":
             normalized = self._timeline_event_details(normalized, normalized)
+        if kind == "character":
+            normalized = normalize_character_card_details(normalized)
         return normalized
 
     @staticmethod

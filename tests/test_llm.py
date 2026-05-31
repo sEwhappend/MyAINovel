@@ -190,6 +190,81 @@ class LLMTests(unittest.TestCase):
         self.assertNotIn("top_k", captured["payload"])
         self.assertNotIn("presence_penalty", captured["payload"])
 
+    def test_stream_text_retries_524_before_first_delta(self) -> None:
+        attempts = []
+        retry_events = []
+        lines = [
+            'data: {"type":"response.output_text.delta","delta":"正文"}\n'.encode("utf-8"),
+            b"\n",
+            b"data: [DONE]\n",
+            b"\n",
+        ]
+
+        def fake_urlopen(req, timeout):
+            attempts.append(req.full_url)
+            if len(attempts) == 1:
+                raise HTTPError(req.full_url, 524, "Timeout", {}, BytesIO(b"error code: 524"))
+            return FakeStreamResponse(lines)
+
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "responses",
+                "chat_model": "writer",
+            }
+        )
+        cancel_event = threading.Event()
+        client.configure_retry_until_cancel(
+            cancel_event,
+            lambda attempt, delay, error: retry_events.append((attempt, delay, error)),
+            delays=[0],
+        )
+        chunks = []
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            text = client.stream_text("writer", [{"role": "user", "content": "x"}], chunks.append)
+
+        self.assertEqual(text, "正文")
+        self.assertEqual(chunks, ["正文"])
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(retry_events[0][0], 1)
+        self.assertIn("HTTP 524", retry_events[0][2])
+
+    def test_stream_text_does_not_retry_after_partial_delta(self) -> None:
+        attempts = []
+        lines = [
+            'data: {"type":"response.output_text.delta","delta":"半"}\n'.encode("utf-8"),
+            b"\n",
+        ]
+
+        class BrokenStreamResponse(FakeStreamResponse):
+            def __iter__(self):
+                yield from self.lines
+                raise TimeoutError("The read operation timed out")
+
+        def fake_urlopen(req, timeout):
+            attempts.append(req.full_url)
+            return BrokenStreamResponse(lines)
+
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "responses",
+                "chat_model": "writer",
+            }
+        )
+        client.configure_retry_until_cancel(threading.Event(), delays=[0])
+        chunks = []
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(LLMError):
+                client.stream_text("writer", [{"role": "user", "content": "x"}], chunks.append)
+
+        self.assertEqual(chunks, ["半"])
+        self.assertEqual(len(attempts), 1)
+
     def test_chat_sends_writing_parameters(self) -> None:
         captured = {}
 

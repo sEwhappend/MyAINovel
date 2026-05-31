@@ -266,6 +266,64 @@ class StorageTests(unittest.TestCase):
 
         self.assertFalse(version_file.exists())
 
+    def test_delete_version_removes_database_row_and_synced_files(self) -> None:
+        project_id = self.store.create_project({"title": "删除单个版本项目"})
+        chapter_id = self.store.save_chapter(project_id, {"number": 1, "title": "章节"})
+        section_id = self.store.save_section(chapter_id, {"number": 1, "title": "第一节"})
+        first_version_id = self.store.save_version(
+            {
+                "project_id": project_id,
+                "chapter_id": chapter_id,
+                "section_id": section_id,
+                "kind": "draft",
+                "label": "待删正文",
+                "content": "正文一",
+            }
+        )
+        second_version_id = self.store.save_version(
+            {
+                "project_id": project_id,
+                "chapter_id": chapter_id,
+                "section_id": section_id,
+                "kind": "rewrite",
+                "label": "保留正文",
+                "content": "正文二",
+            }
+        )
+        project_dir = self._project_dir(project_id)
+        deleted_file = project_dir / "versions" / "draft" / f"{first_version_id:04d}-待删正文.md"
+        kept_file = project_dir / "versions" / "rewrite" / f"{second_version_id:04d}-保留正文.md"
+        self.assertTrue(deleted_file.exists())
+        self.assertTrue(kept_file.exists())
+
+        self.store.delete_version(first_version_id)
+
+        self.assertIsNone(self.store.get_version(first_version_id))
+        self.assertIsNotNone(self.store.get_version(second_version_id))
+        self.assertFalse(deleted_file.exists())
+        self.assertTrue(kept_file.exists())
+
+    def test_delete_version_rejects_finalized_version(self) -> None:
+        project_id = self.store.create_project({"title": "保护定稿版本项目"})
+        chapter_id = self.store.save_chapter(project_id, {"number": 1, "title": "章节"})
+        section_id = self.store.save_section(chapter_id, {"number": 1, "title": "第一节"})
+        version_id = self.store.save_version(
+            {
+                "project_id": project_id,
+                "chapter_id": chapter_id,
+                "section_id": section_id,
+                "kind": "rewrite",
+                "label": "定稿",
+                "content": "正文",
+            }
+        )
+        self.store.finalize_section(section_id, version_id)
+
+        with self.assertRaisesRegex(ValueError, "定稿版本不能直接删除"):
+            self.store.delete_version(version_id)
+
+        self.assertIsNotNone(self.store.get_version(version_id))
+
     def test_delete_chapter_removes_sections_versions_and_renumbers_project(self) -> None:
         project_id = self.store.create_project({"title": "删除章节项目"})
         first_chapter = self.store.save_chapter(project_id, {"number": 1, "title": "第一章"})

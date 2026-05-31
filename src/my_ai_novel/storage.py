@@ -850,6 +850,25 @@ class NovelStore:
         self.sync_project_files(int(values["project_id"]))
         return version_id
 
+    def delete_version(self, version_id: int) -> None:
+        project_id = self._project_id_for_version(version_id)
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT id FROM versions WHERE id=?",
+                (version_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("version not found")
+            finalized = conn.execute(
+                "SELECT id FROM sections WHERE finalized_version_id=?",
+                (version_id,),
+            ).fetchone()
+            if finalized is not None:
+                raise ValueError("定稿版本不能直接删除，请先取消定稿")
+            conn.execute("DELETE FROM versions WHERE id=?", (version_id,))
+        if project_id is not None:
+            self.sync_project_files(project_id)
+
     def sync_all_projects(self) -> None:
         for project in self.list_projects():
             self.sync_project_files(int(project["id"]))

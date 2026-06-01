@@ -402,6 +402,10 @@ class FakePipeline:
             raise ValueError("当前章节没有下一节")
         return self.next_section
 
+    def write_chapter_memory(self, project_id: int, chapter_id: int) -> dict[str, object]:
+        self.calls.append(("chapter_memory", project_id, chapter_id))
+        return {"world_items": 0}
+
 
 class FakeLLM:
     def __init__(self) -> None:
@@ -803,6 +807,51 @@ class UISmokeTests(unittest.TestCase):
 
         self.assertEqual(store.versions, [])
         self.assertEqual(messages, ["总框架内容不能为空"])
+
+    def test_delete_selected_outline_version_removes_version_and_refreshes(self) -> None:
+        store = FakeStore()
+        store.versions = [
+            {
+                "id": 17,
+                "project_id": 42,
+                "kind": "global_outline",
+                "label": "最新框架",
+                "content": "最新内容",
+                "metadata_json": "{}",
+                "created_at": "now",
+            },
+            {
+                "id": 9,
+                "project_id": 42,
+                "kind": "global_outline",
+                "label": "旧框架",
+                "content": "旧内容",
+                "metadata_json": "{}",
+                "created_at": "before",
+            },
+        ]
+        ui = object.__new__(NovelDesktopUI)
+        ui.current_project_id = 42
+        ui.store = store
+        ui.outline_version_rows = store.versions
+        ui.outline_versions = FakeListbox()
+        ui.outline_versions.items = ["1 | 最新框架 | now", "2 | 旧框架 | before"]
+        ui.outline_versions.selection_set(0)
+        ui.outline_text = FakeText("最新内容")
+        ui.outline_split_preview = FakeText("旧预览")
+        events = []
+        ui.refresh_logs = lambda: events.append("refresh_logs")
+        ui._ok = lambda message: events.append(f"ok:{message}")
+        ui._error = lambda message: events.append(f"error:{message}")
+
+        ui.delete_selected_outline_version()
+
+        self.assertIsNone(store.get_version(17))
+        self.assertIsNotNone(store.get_version(9))
+        self.assertEqual(ui.outline_versions.items, ["1 | 旧框架 | before"])
+        self.assertEqual(ui.outline_versions.curselection(), (0,))
+        self.assertEqual(ui.outline_text.get("1.0", "end"), "旧内容")
+        self.assertEqual(events, ["refresh_logs", "ok:总框架版本已删除"])
 
     def test_confirm_outline_split_runs_pipeline_async(self) -> None:
         pipeline = FakeStreamingPipeline()
@@ -1250,6 +1299,31 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("当前章节没有下一节", result["stopped"])
         self.assertEqual(store.finalized_section, (9, 103))
         self.assertIs(ui.services.llm.retry_configs[0][0], cancel_event)
+        self.assertEqual(ui.services.llm.retry_configs[-4][0], cancel_event)
+        self.assertEqual(ui.services.llm.retry_configs[-3], (None, None, None))
+        self.assertEqual(ui.services.llm.retry_configs[-2][0], cancel_event)
+        self.assertEqual(ui.services.llm.retry_configs[-1], (None, None, None))
+        self.assertIn(("chapter_memory", 42, 3), pipeline.calls)
+
+    def test_chapter_memory_does_not_inherit_indefinite_retry(self) -> None:
+        store = FakeStore()
+        store.sections = {
+            3: [{"id": 8, "chapter_id": 3, "number": 1, "title": "第一节", "status": "planned"}]
+        }
+        pipeline = FakePipeline()
+        pipeline.next_sections = [None]
+        ui = object.__new__(NovelDesktopUI)
+        ui.store = store
+        ui.pipeline = pipeline
+        ui.services = FakeServices()
+        cancel_event = threading.Event()
+
+        result = ui._run_chapter_writing_automation(42, 3, 8, "全文改写", cancel_event)
+
+        self.assertEqual(result["chapter_memory_results"], [{"ok": True, "world_items": 0}])
+        self.assertIn(("chapter_memory", 42, 3), pipeline.calls)
+        self.assertEqual(ui.services.llm.retry_configs[-3], (None, None, None))
+        self.assertIs(ui.services.llm.retry_configs[-2][0], cancel_event)
         self.assertEqual(ui.services.llm.retry_configs[-1], (None, None, None))
 
     def test_chapter_automation_does_not_cross_chapter_by_default(self) -> None:
@@ -2073,6 +2147,16 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn('text.setObjectName("ProjectTextInput")', source)
         self.assertIn('text.setPlaceholderText(f"请输入{label}")', source)
 
+    def test_pyside_outline_page_uses_scrollable_left_settings_and_delete_button(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("splitter = QSplitter(Qt.Orientation.Horizontal)", source)
+        self.assertIn("splitter.addWidget(self._vertical_scroll_area(left_frame))", source)
+        self.assertIn("self.outline_versions.setMinimumHeight(280)", source)
+        self.assertIn("left.addWidget(self.outline_versions, 4)", source)
+        self.assertIn('"删除总框架版本", self.delete_selected_outline_version', source)
+        self.assertIn("def delete_selected_outline_version", source)
+        self.assertIn("self.store.delete_version(version_id)", source)
+
     def test_pyside_writing_automation_uses_streaming_draft_and_retry(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
         automation_start = source.index("def _run_writing_automation(")
@@ -2083,6 +2167,13 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("def _configure_llm_retry", source)
         self.assertIn("configure_retry_until_cancel(cancel_event, on_retry)", source)
         self.assertIn("self.bridge.status.emit", source)
+
+    def test_pyside_chapter_memory_does_not_inherit_retry_until_cancel(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("def _try_write_chapter_memory(", source)
+        self.assertIn("self.services.llm.configure_retry_until_cancel(None, None)", source)
+        self.assertIn("return {\"ok\": True, **self.pipeline.write_chapter_memory(project_id, chapter_id)}", source)
+        self.assertIn("self._try_write_chapter_memory(project_id, chapter_id, cancel_event)", source)
 
     def test_pyside_writing_refresh_preserves_current_section(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")

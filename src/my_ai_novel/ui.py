@@ -193,16 +193,19 @@ class NovelDesktopUI:
         ttk.Button(tab, text="丰满总体框架", command=self.expand_outline).pack(anchor="w")
         ttk.Button(tab, text="保存当前总框架修改", command=self.save_current_outline).pack(anchor="w", pady=(4, 0))
         ttk.Button(tab, text="确认并拆分章节", command=self.confirm_outline_split).pack(anchor="w", pady=(4, 8))
+        ttk.Button(tab, text="删除总框架版本", command=self.delete_selected_outline_version).pack(anchor="w", pady=(0, 8))
         panes = ttk.PanedWindow(tab, orient="horizontal")
         panes.pack(fill="both", expand=True)
         left = ttk.Frame(panes)
         right = ttk.Frame(panes)
-        panes.add(left, weight=2)
-        panes.add(right, weight=1)
-        self.outline_versions = tk.Listbox(left, height=6)
-        self.outline_versions.pack(fill="x")
-        self.outline_text = tk.Text(left, wrap="word")
-        self.outline_text.pack(fill="both", expand=True, pady=(8, 0))
+        panes.add(left, weight=1)
+        panes.add(right, weight=2)
+        ttk.Label(left, text="总框架版本").pack(anchor="w")
+        self.outline_versions = tk.Listbox(left, height=18)
+        self.outline_versions.pack(fill="both", expand=True, pady=(4, 0))
+        ttk.Label(right, text="总框架内容").pack(anchor="w")
+        self.outline_text = tk.Text(right, wrap="word")
+        self.outline_text.pack(fill="both", expand=True, pady=(4, 8))
         ttk.Label(right, text="章节拆分预览").pack(anchor="w")
         self.outline_split_preview = tk.Text(right, wrap="word")
         self.outline_split_preview.pack(fill="both", expand=True, pady=(8, 0))
@@ -694,6 +697,19 @@ class NovelDesktopUI:
             "已确认并拆分章节",
             lambda _result: self._after_confirm_outline_split(),
         )
+
+    def delete_selected_outline_version(self) -> None:
+        version_id = self._selected_outline_version()
+        if not version_id:
+            self._error("请选择一个总框架版本")
+            return
+        self.store.delete_version(version_id)
+        self.outline_text.delete("1.0", tk.END)
+        self.outline_split_preview.delete("1.0", tk.END)
+        self.refresh_outline_versions()
+        self.select_latest_outline_version()
+        self.refresh_logs()
+        self._ok("总框架版本已删除")
 
     def _after_confirm_outline_split(self) -> None:
         self.current_chapter_id = None
@@ -1554,7 +1570,7 @@ class NovelDesktopUI:
                 processed.append(section_id)
                 next_section = result.get("next_section")
                 if not isinstance(next_section, dict):
-                    chapter_memory_results.append(self._try_write_chapter_memory(project_id, chapter_id))
+                    chapter_memory_results.append(self._try_write_chapter_memory(project_id, chapter_id, cancel_event))
                     if auto_next_chapter:
                         next_chapter_section = self._first_section_in_next_chapter(project_id, chapter_id)
                         if next_chapter_section is not None:
@@ -1570,7 +1586,7 @@ class NovelDesktopUI:
                     }
                 next_section_id = int(next_section["id"])
                 if int(next_section.get("chapter_id", chapter_id)) != int(chapter_id):
-                    chapter_memory_results.append(self._try_write_chapter_memory(project_id, chapter_id))
+                    chapter_memory_results.append(self._try_write_chapter_memory(project_id, chapter_id, cancel_event))
                     if auto_next_chapter:
                         chapter_id = int(next_section["chapter_id"])
                         section_id = next_section_id
@@ -1594,11 +1610,22 @@ class NovelDesktopUI:
             "chapter_memory_results": chapter_memory_results,
         }
 
-    def _try_write_chapter_memory(self, project_id: int, chapter_id: int) -> dict[str, Any]:
+    def _try_write_chapter_memory(
+        self,
+        project_id: int,
+        chapter_id: int,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        retry_supported = hasattr(self.services.llm, "configure_retry_until_cancel")
+        if retry_supported:
+            self.services.llm.configure_retry_until_cancel(None, None)
         try:
             return {"ok": True, **self.pipeline.write_chapter_memory(project_id, chapter_id)}
         except Exception as exc:  # noqa: BLE001 - automation should not discard finalized prose
             return {"ok": False, "chapter_id": chapter_id, "error": str(exc)}
+        finally:
+            if retry_supported and cancel_event is not None and not cancel_event.is_set():
+                self._configure_llm_retry(cancel_event)
 
     def _first_section_in_next_chapter(self, project_id: int, chapter_id: int) -> dict[str, Any] | None:
         chapters = self.store.list_chapters(project_id)

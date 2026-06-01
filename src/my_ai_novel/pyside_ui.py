@@ -2036,7 +2036,11 @@ if PYSIDE6_AVAILABLE:
             page = self._add_page("总框架")
             self.outline_page = page
             layout = QHBoxLayout(page)
-            left = QVBoxLayout()
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            layout.addWidget(splitter)
+            left_frame = QWidget()
+            left = QVBoxLayout(left_frame)
+            left.setContentsMargins(0, 0, 8, 0)
             self.outline_mode = QComboBox()
             self.outline_mode.addItems(["整书模式", "连载模式"])
             self.outline_mode.currentTextChanged.connect(lambda _text: self._sync_outline_mode_fields())
@@ -2073,8 +2077,10 @@ if PYSIDE6_AVAILABLE:
             left.addWidget(QLabel("总框架版本"))
             self.outline_versions = QListWidget()
             self.outline_versions.currentRowChanged.connect(lambda _row: self.show_outline_version())
-            left.addWidget(self.outline_versions, 1)
-            layout.addLayout(left, 1)
+            self.outline_versions.setMinimumHeight(280)
+            left.addWidget(self.outline_versions, 4)
+            left.addWidget(self._button("删除总框架版本", self.delete_selected_outline_version))
+            splitter.addWidget(self._vertical_scroll_area(left_frame))
             right = QSplitter(Qt.Orientation.Vertical)
             self.outline_text = QTextEdit()
             self.outline_text.setObjectName("WritingEditor")
@@ -2083,7 +2089,9 @@ if PYSIDE6_AVAILABLE:
             self.outline_split_preview.setPlaceholderText("确认并拆分章节的流式输出")
             right.addWidget(self.outline_text)
             right.addWidget(self.outline_split_preview)
-            layout.addWidget(right, 2)
+            splitter.addWidget(right)
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 2)
             self._sync_outline_mode_fields()
 
         def _build_world_page(self) -> None:
@@ -3235,6 +3243,19 @@ if PYSIDE6_AVAILABLE:
                 lambda _result: self._after_confirm_outline_split(),
             )
 
+        def delete_selected_outline_version(self) -> None:
+            version_id = self._selected_outline_version()
+            if not version_id:
+                self._error("请选择一个总框架版本")
+                return
+            self.store.delete_version(version_id)
+            self.outline_text.clear()
+            self.outline_split_preview.clear()
+            self.refresh_outline_versions()
+            self.select_latest_outline_version()
+            self.refresh_logs()
+            self._ok("总框架版本已删除")
+
         def refresh_outline_versions(self) -> None:
             self.outline_versions.clear()
             self.outline_version_rows = []
@@ -4110,10 +4131,7 @@ if PYSIDE6_AVAILABLE:
                     if isinstance(next_section, dict) and int(next_section.get("chapter_id", chapter_id)) == int(chapter_id):
                         section_id = int(next_section["id"])
                         continue
-                    try:
-                        self.pipeline.write_chapter_memory(project_id, chapter_id)
-                    except Exception:
-                        pass
+                    self._try_write_chapter_memory(project_id, chapter_id, cancel_event)
                     if auto_next_chapter:
                         next_chapter_section = self._first_section_in_next_chapter(project_id, chapter_id)
                         if next_chapter_section is not None:
@@ -4125,6 +4143,23 @@ if PYSIDE6_AVAILABLE:
                 if hasattr(self.services.llm, "configure_retry_until_cancel"):
                     self.services.llm.configure_retry_until_cancel(None, None)
             return {"processed": processed, "last_section_id": section_id, "next_section": None}
+
+        def _try_write_chapter_memory(
+            self,
+            project_id: int,
+            chapter_id: int,
+            cancel_event: threading.Event | None = None,
+        ) -> dict[str, Any]:
+            retry_supported = hasattr(self.services.llm, "configure_retry_until_cancel")
+            if retry_supported:
+                self.services.llm.configure_retry_until_cancel(None, None)
+            try:
+                return {"ok": True, **self.pipeline.write_chapter_memory(project_id, chapter_id)}
+            except Exception as exc:  # noqa: BLE001 - chapter memory must not block finalized prose
+                return {"ok": False, "chapter_id": chapter_id, "error": str(exc)}
+            finally:
+                if retry_supported and cancel_event is not None and not cancel_event.is_set():
+                    self._configure_llm_retry(cancel_event)
 
         def _first_section_in_next_chapter(self, project_id: int, chapter_id: int) -> dict[str, Any] | None:
             chapters = self.store.list_chapters(project_id)

@@ -261,7 +261,7 @@ def project_index_by_id(projects: list[dict[str, Any]], project_id: int | None) 
 
 
 def format_export_success_message(path: Any) -> str:
-    return f"全书 Word 已导出：{path}"
+    return f"全书 Word 已分节导出到：{path}"
 
 
 def latest_outline_index(rows: list[dict[str, Any]]) -> int | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 from xml.sax.saxutils import escape
@@ -23,9 +24,9 @@ def export_full_book_docx(store: Any, project_id: int) -> Path:
     export_dir = project_dir / "exports"
     export_dir.mkdir(parents=True, exist_ok=True)
     title = str(project.get("title") or f"project-{project_id}")
-    output_path = export_dir / f"{sanitize_filename(title)}-全书.docx"
+    output_dir = _unique_export_dir(export_dir, f"{sanitize_filename(title)}-分节Word")
 
-    paragraphs: list[str] = [title]
+    chapter_file_counts: dict[int, int] = defaultdict(int)
     for chapter in store.list_chapters(project_id):
         finalized_sections = [
             (section, _finalized_version(store, section))
@@ -41,15 +42,43 @@ def export_full_book_docx(store: Any, project_id: int) -> Path:
             continue
 
         chapter_title = _numbered_title("第{number}章", chapter)
-        paragraphs.append(chapter_title)
+        chapter_dir = output_dir / _export_item_filename(chapter, "chapter", "章")
+        chapter_dir.mkdir(parents=True, exist_ok=True)
         for section, version in finalized_sections:
             section_title = _numbered_title("第{number}节", section)
+            paragraphs: list[str] = [title, chapter_title]
             if section_title:
                 paragraphs.append(section_title)
             paragraphs.extend(_content_paragraphs(str(version.get("content") or "")))
+            chapter_id = int(chapter["id"])
+            chapter_file_counts[chapter_id] += 1
+            file_index = chapter_file_counts[chapter_id]
+            section_path = chapter_dir / _export_item_filename(section, "section", "节", file_index, ".docx")
+            _write_docx(section_path, paragraphs)
 
-    _write_docx(output_path, paragraphs)
-    return output_path
+    return output_dir
+
+
+def _unique_export_dir(parent: Path, base_name: str) -> Path:
+    candidate = parent / base_name
+    index = 2
+    while candidate.exists():
+        candidate = parent / f"{base_name}-{index}"
+        index += 1
+    candidate.mkdir(parents=True, exist_ok=False)
+    return candidate
+
+
+def _export_item_filename(
+    item: dict[str, Any],
+    fallback_prefix: str,
+    number_label: str,
+    fallback_number: int | None = None,
+    suffix: str = "",
+) -> str:
+    number = item.get("number") or fallback_number or item.get("id") or 0
+    title = str(item.get("title") or "").strip() or f"{fallback_prefix}-{number}"
+    return f"{int(number):03d}-{number_label}{number}-{sanitize_filename(title)}{suffix}"
 
 
 def _finalized_version(store: Any, section: dict[str, Any]) -> dict[str, Any] | None:

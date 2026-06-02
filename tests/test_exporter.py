@@ -16,6 +16,11 @@ from my_ai_novel.storage import NovelStore
 TEST_OUTPUT = ROOT / "test-output"
 
 
+def read_docx_document_xml(docx_path: Path) -> str:
+    with ZipFile(docx_path) as docx:
+        return docx.read("word/document.xml").decode("utf-8")
+
+
 class ExporterTests(unittest.TestCase):
     def setUp(self) -> None:
         TEST_OUTPUT.mkdir(exist_ok=True)
@@ -67,14 +72,17 @@ class ExporterTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.get_section(finalized_without_version_id)["finalized_version_id"])
 
-        docx_path = exporter.export_full_book_docx(self.store, project_id)
+        output_dir = exporter.export_full_book_docx(self.store, project_id)
 
-        self.assertEqual(docx_path.parent.name, "exports")
-        self.assertTrue(docx_path.exists())
-        self.assertTrue(str(docx_path).startswith(str(self.projects_root)))
+        self.assertEqual(output_dir.parent.name, "exports")
+        self.assertTrue(output_dir.is_dir())
+        self.assertTrue(str(output_dir).startswith(str(self.projects_root)))
 
-        with ZipFile(docx_path) as docx:
-            document_xml = docx.read("word/document.xml").decode("utf-8")
+        docx_files = sorted(output_dir.rglob("*.docx"))
+        self.assertEqual(len(docx_files), 1)
+        self.assertEqual(docx_files[0].parent.name, "001-章1-旧宅入口")
+        self.assertEqual(docx_files[0].name, "001-节1-走廊.docx")
+        document_xml = read_docx_document_xml(docx_files[0])
 
         self.assertIn("雨夜旧宅", document_xml)
         self.assertIn("第1章 旧宅入口", document_xml)
@@ -100,10 +108,11 @@ class ExporterTests(unittest.TestCase):
         )
         self.store.finalize_section(section_id, version_id)
 
-        docx_path = exporter.export_full_book_docx(self.store, project_id)
+        output_dir = exporter.export_full_book_docx(self.store, project_id)
 
-        with ZipFile(docx_path) as docx:
-            document_xml = docx.read("word/document.xml").decode("utf-8")
+        docx_files = sorted(output_dir.rglob("*.docx"))
+        self.assertEqual(len(docx_files), 1)
+        document_xml = read_docx_document_xml(docx_files[0])
 
         self.assertIn("A&amp;B &lt;书&gt;", document_xml)
         self.assertIn("她说：A&amp;B &lt;ok&gt;", document_xml)
@@ -138,12 +147,13 @@ class ExporterTests(unittest.TestCase):
         self.store.finalize_section(second_section_id, second_version_id)
 
         self.store.move_chapter(project_id, second_chapter_id, -1)
-        docx_path = exporter.export_full_book_docx(self.store, project_id)
+        output_dir = exporter.export_full_book_docx(self.store, project_id)
 
-        with ZipFile(docx_path) as docx:
-            document_xml = docx.read("word/document.xml").decode("utf-8")
+        document_xmls = [read_docx_document_xml(path) for path in sorted(output_dir.rglob("*.docx"))]
 
-        self.assertLess(document_xml.index("原第二章"), document_xml.index("原第一章"))
+        self.assertEqual(len(document_xmls), 2)
+        self.assertIn("原第二章", document_xmls[0])
+        self.assertIn("原第一章", document_xmls[1])
 
 if __name__ == "__main__":
     unittest.main()

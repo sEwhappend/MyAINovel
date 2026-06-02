@@ -1760,9 +1760,9 @@ class UISmokeTests(unittest.TestCase):
         self.assertEqual(messages, ["请先创建或选择项目"])
 
     def test_export_success_message_includes_output_path(self) -> None:
-        path = Path("projects/project-7/exports/新项目-全书.docx")
+        path = Path("projects/project-7/exports/新项目-分节Word")
 
-        self.assertEqual(format_export_success_message(path), f"全书 Word 已导出：{path}")
+        self.assertEqual(format_export_success_message(path), f"全书 Word 已分节导出到：{path}")
 
     def test_async_error_completion_refreshes_logs_and_reports_message(self) -> None:
         ui = object.__new__(NovelDesktopUI)

@@ -456,7 +456,7 @@ if PYSIDE6_AVAILABLE:
                 self._scene.addText("暂无可显示的关系数据")
                 return
 
-            positions = self._layout_positions(nodes, mode)
+            positions = self._layout_positions(nodes, edges, mode)
             for edge in edges:
                 source_pos = positions.get(str(edge.get("source")))
                 target_pos = positions.get(str(edge.get("target")))
@@ -535,17 +535,84 @@ if PYSIDE6_AVAILABLE:
                 item = item.parentItem()
             return item
 
-        def _layout_positions(self, nodes: list[dict[str, Any]], mode: str) -> dict[str, tuple[float, float]]:
+        def _layout_positions(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], mode: str) -> dict[str, tuple[float, float]]:
             if mode == "event":
-                return {
-                    str(node.get("id")): ((index % 4) * 250.0, (index // 4) * 150.0)
-                    for index, node in enumerate(nodes)
-                }
-            radius = max(160.0, len(nodes) * 32.0)
+                return self._event_timeline_positions(nodes, edges)
+            return self._character_layer_positions(nodes)
+
+        def _character_layer_positions(self, nodes: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
+            characters = [node for node in nodes if str(node.get("kind")) == "character"]
+            organizations = [node for node in nodes if str(node.get("kind")) == "organization"]
+            others = [node for node in nodes if str(node.get("kind")) not in {"character", "organization"}]
+            characters = sorted(characters, key=lambda node: int(node.get("weight", 1)), reverse=True)
             positions: dict[str, tuple[float, float]] = {}
-            for index, node in enumerate(nodes):
-                angle = (math.tau * index / max(1, len(nodes))) - math.pi / 2
-                positions[str(node.get("id"))] = (math.cos(angle) * radius, math.sin(angle) * radius)
+            primary_count = min(2, len(characters)) if len(characters) > 3 else min(1, len(characters))
+            primary = characters[:primary_count]
+            secondary = characters[primary_count:]
+            for index, node in enumerate(primary):
+                positions[str(node.get("id"))] = (-300.0, (index - (len(primary) - 1) / 2) * 170.0)
+            for index, node in enumerate(secondary):
+                column = index % 2
+                row = index // 2
+                x = -40.0 + column * 220.0
+                y = (row - max(0, (len(secondary) - 1) // 2) / 2) * 170.0
+                positions[str(node.get("id"))] = (x, y)
+            for index, node in enumerate(organizations):
+                positions[str(node.get("id"))] = (450.0, (index - (len(organizations) - 1) / 2) * 180.0)
+            for index, node in enumerate(others):
+                positions[str(node.get("id"))] = (680.0, (index - (len(others) - 1) / 2) * 160.0)
+            return positions
+
+        def _event_timeline_positions(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
+            events = [node for node in nodes if str(node.get("kind")) == "timeline_event"]
+            helpers = [node for node in nodes if str(node.get("kind")) != "timeline_event"]
+            event_ids = {str(node.get("id")): index for index, node in enumerate(events)}
+            positions: dict[str, tuple[float, float]] = {}
+            event_gap = 320.0
+            for index, node in enumerate(events):
+                positions[str(node.get("id"))] = (index * event_gap, 0.0)
+            helper_lanes = {
+                "character": -230.0,
+                "organization": -420.0,
+                "location": 230.0,
+                "foreshadowing": 420.0,
+                "rule": 610.0,
+                "forbidden": 800.0,
+            }
+            connected_event_positions: dict[str, list[int]] = {}
+            for edge in edges:
+                source = str(edge.get("source", ""))
+                target = str(edge.get("target", ""))
+                if source in event_ids and target not in event_ids:
+                    connected_event_positions.setdefault(target, []).append(event_ids[source])
+                if target in event_ids and source not in event_ids:
+                    connected_event_positions.setdefault(source, []).append(event_ids[target])
+            grouped_helpers: dict[tuple[str, int], list[dict[str, Any]]] = {}
+            loose_helpers: list[dict[str, Any]] = []
+            for index, node in enumerate(helpers):
+                node_id = str(node.get("id"))
+                kind = str(node.get("kind"))
+                connected = connected_event_positions.get(node_id, [])
+                if not connected:
+                    loose_helpers.append(node)
+                    continue
+                anchor = round(sum(connected) / len(connected))
+                grouped_helpers.setdefault((kind, anchor), []).append(node)
+            for (kind, anchor), group in grouped_helpers.items():
+                lane_y = helper_lanes.get(kind, 990.0)
+                for index, node in enumerate(group):
+                    row = index // 5
+                    column = index % 5
+                    offset = (column - (min(len(group), 5) - 1) / 2) * 155.0
+                    y_offset = row * 110.0
+                    direction = -1 if lane_y < 0 else 1
+                    positions[str(node.get("id"))] = (anchor * event_gap + offset, lane_y + direction * y_offset)
+            for index, node in enumerate(loose_helpers):
+                kind = str(node.get("kind"))
+                lane_y = helper_lanes.get(kind, 990.0)
+                row = index // 6
+                column = index % 6
+                positions[str(node.get("id"))] = (column * 180.0, lane_y + row * 120.0)
             return positions
 
         def _node_color(self, kind: str, source: str = "") -> QColor:
@@ -2165,6 +2232,25 @@ if PYSIDE6_AVAILABLE:
             self.relation_graph_search.setPlaceholderText("搜索人物、事件或摘要")
             self.relation_graph_search.textChanged.connect(lambda _text: self.refresh_relation_graph())
             toolbar.addWidget(self.relation_graph_search, 1)
+            self.relation_graph_edge_filter = QComboBox()
+            self.relation_graph_edge_filter.addItem("全部关系", "all")
+            self.relation_graph_edge_filter.addItem("核心关系", "core")
+            self.relation_graph_edge_filter.addItem("人物/组织", "people")
+            self.relation_graph_edge_filter.addItem("事件因果", "causal")
+            self.relation_graph_edge_filter.addItem("出场/地点", "presence")
+            self.relation_graph_edge_filter.addItem("伏笔/规则", "lore")
+            self.relation_graph_edge_filter.currentTextChanged.connect(lambda _text: self.refresh_relation_graph())
+            toolbar.addWidget(QLabel("关系范围"))
+            toolbar.addWidget(self.relation_graph_edge_filter)
+            self.relation_graph_node_filter = QComboBox()
+            self.relation_graph_node_filter.addItem("全部节点", "all")
+            self.relation_graph_node_filter.addItem("主线节点", "core")
+            self.relation_graph_node_filter.addItem("只看事件", "events")
+            self.relation_graph_node_filter.addItem("事件+人物", "events_people")
+            self.relation_graph_node_filter.addItem("事件+地点", "events_locations")
+            self.relation_graph_node_filter.currentTextChanged.connect(lambda _text: self.refresh_relation_graph())
+            toolbar.addWidget(QLabel("节点范围"))
+            toolbar.addWidget(self.relation_graph_node_filter)
             self.relation_graph_inferred = QCheckBox("显示弱推断关系")
             self.relation_graph_inferred.setChecked(True)
             self.relation_graph_inferred.stateChanged.connect(lambda _state: self.refresh_relation_graph())
@@ -2697,11 +2783,16 @@ if PYSIDE6_AVAILABLE:
             else:
                 graph = build_character_graph(world_items, chapters, sections_by_chapter, include_inferred)
             graph = self._filter_relation_graph_for_mode(graph, mode)
+            graph = self._filter_relation_graph_for_display(graph, mode)
             self.relation_graph_view.render_graph(graph, mode, self.relation_graph_search.text())
             node_count = len(graph.get("nodes", []))
             edge_count = len(graph.get("edges", []))
             warnings = graph.get("warnings", [])
-            lines = [f"节点：{node_count}", f"关系：{edge_count}"]
+            inferred_count = len([edge for edge in graph.get("edges", []) if edge.get("confidence") == "inferred"])
+            missing_count = len([node for node in graph.get("nodes", []) if node.get("source") == "missing_reference"])
+            lines = [f"节点：{node_count}", f"关系：{edge_count}", f"弱推断：{inferred_count}", f"缺失引用：{missing_count}"]
+            if node_count and edge_count > node_count * 3:
+                lines.extend(["", "当前图谱关系较密，建议切换到核心关系或收窄节点范围。"])
             if warnings:
                 lines.append("")
                 lines.append("提示")
@@ -2786,6 +2877,64 @@ if PYSIDE6_AVAILABLE:
                 if str(edge.get("source", "")) in node_ids and str(edge.get("target", "")) in node_ids
             ]
             return {"nodes": nodes, "edges": edges, "warnings": graph.get("warnings", [])}
+
+        def _filter_relation_graph_for_display(self, graph: dict[str, Any], mode: str) -> dict[str, Any]:
+            edge_filter = str(self.relation_graph_edge_filter.currentData() or "core")
+            node_filter = str(self.relation_graph_node_filter.currentData() or "core")
+            nodes = list(graph.get("nodes", []))
+            edges = list(graph.get("edges", []))
+            if edge_filter != "all":
+                allowed_edge_kinds = self._relation_graph_edge_kinds(edge_filter, mode)
+                edges = [edge for edge in edges if str(edge.get("kind", "")) in allowed_edge_kinds]
+            if node_filter != "all":
+                allowed_node_kinds = self._relation_graph_node_kinds(node_filter, mode)
+                nodes = [node for node in nodes if str(node.get("kind", "")) in allowed_node_kinds]
+            node_ids = {str(node.get("id", "")) for node in nodes}
+            edges = [
+                edge
+                for edge in edges
+                if str(edge.get("source", "")) in node_ids and str(edge.get("target", "")) in node_ids
+            ]
+            connected_ids = {str(edge.get("source", "")) for edge in edges} | {str(edge.get("target", "")) for edge in edges}
+            if edge_filter != "all":
+                nodes = [
+                    node
+                    for node in nodes
+                    if str(node.get("id", "")) in connected_ids or str(node.get("kind", "")) == "timeline_event"
+                ]
+            return {"nodes": nodes, "edges": edges, "warnings": graph.get("warnings", [])}
+
+        def _relation_graph_edge_kinds(self, edge_filter: str, mode: str) -> set[str]:
+            if mode == "character":
+                groups = {
+                    "core": {"ally", "rival", "conflict", "trust_shift", "relationship_delta", "member_of", "leader_of", "affiliated_with"},
+                    "people": {"ally", "rival", "conflict", "relationship", "trust_shift", "relationship_delta", "childhood_friend"},
+                    "causal": set(),
+                    "presence": {"same_scene"},
+                    "lore": {"member_of", "leader_of", "affiliated_with"},
+                }
+                return groups.get(edge_filter, groups["core"])
+            groups = {
+                "core": {"causes", "caused_by", "before", "after", "reveals", "pays_off", "foreshadow"},
+                "people": {"participant", "member_action"},
+                "causal": {"causes", "caused_by", "before", "after", "reveals", "pays_off"},
+                "presence": {"participant", "located_at"},
+                "lore": {"foreshadow", "pays_off", "rule_constraint", "forbidden_constraint"},
+            }
+            return groups.get(edge_filter, groups["core"])
+
+        def _relation_graph_node_kinds(self, node_filter: str, mode: str) -> set[str]:
+            if mode == "character":
+                if node_filter == "events":
+                    return {"character"}
+                return {"character", "organization"}
+            groups = {
+                "core": {"timeline_event", "foreshadowing"},
+                "events": {"timeline_event"},
+                "events_people": {"timeline_event", "character", "organization"},
+                "events_locations": {"timeline_event", "location"},
+            }
+            return groups.get(node_filter, {"timeline_event", "character", "location", "organization", "foreshadowing", "rule", "forbidden"})
 
         def _relation_graph_kind_label(self, kind: str) -> str:
             if kind == "chapter":

@@ -2562,6 +2562,31 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("self.stack.setCurrentWidget(self.world_page)", source)
         self.assertIn("self._build_relation_graph_page()", source)
 
+    def test_pyside_relation_graph_has_readability_filters_and_layered_layouts(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        self.assertIn("self.relation_graph_edge_filter = QComboBox()", source)
+        self.assertLess(source.index('"全部关系", "all"'), source.index('"核心关系", "core"'))
+        self.assertIn('"核心关系", "core"', source)
+        self.assertIn('"事件因果", "causal"', source)
+        self.assertIn('"伏笔/规则", "lore"', source)
+        self.assertIn("self.relation_graph_node_filter = QComboBox()", source)
+        self.assertLess(source.index('"全部节点", "all"'), source.index('"主线节点", "core"'))
+        self.assertIn('"主线节点", "core"', source)
+        self.assertIn('"只看事件", "events"', source)
+        self.assertIn("self.relation_graph_inferred.setChecked(True)", source)
+        self.assertIn("def _filter_relation_graph_for_display", source)
+        self.assertIn("def _relation_graph_edge_kinds", source)
+        self.assertIn("def _relation_graph_node_kinds", source)
+        self.assertIn("当前图谱关系较密", source)
+        self.assertIn("def _character_layer_positions", source)
+        self.assertIn("def _event_timeline_positions", source)
+        self.assertIn('helper_lanes = {', source)
+        self.assertIn('"timeline_event"', source)
+        self.assertIn("event_gap = 320.0", source)
+        self.assertIn('"character": -230.0', source)
+        self.assertIn('"location": 230.0', source)
+        self.assertIn("grouped_helpers", source)
+
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1
         while time.time() < deadline:

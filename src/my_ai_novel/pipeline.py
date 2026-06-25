@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
-from .llm import LLMClient, parse_json_response
+from . import style_library
+from .llm import LLMClient, LLMError, parse_json_response
 from .models import WORLD_ITEM_KINDS, validate_world_kind
 from .prompts import SCHEMA_HINTS, build_messages, build_project_writing_constraints
 from .retrieval import retrieve_context
 from .review import build_rewrite_request, validate_review_issues
 from .storage import NovelStore
+from .style_ingest import (
+    chunk,
+    clean_text,
+    estimate_tokens,
+    metrics,
+    recommend_sampling,
+    sample_chunks,
+    text_sha1,
+)
 from .style_tags import list_style_tag_catalog
 from .world_modules import (
     character_basic_fields_from_details,
@@ -84,10 +95,41 @@ def parse_length_target(value: Any) -> int | None:
     return None
 
 
+_STYLE_PROFILE_INJECT_KEYS = (
+    "summary",
+    "narrative",
+    "sentence",
+    "paragraph",
+    "dialogue",
+    "description",
+    "emotion",
+    "pacing",
+    "punctuation_conventions",
+    "anti_ai_rules",
+    "rewrite_guides",
+    "metrics",
+    "sampling",
+)
+
+
+def compact_style_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
+    """精简文风画像用于注入正文/审稿/改写：保留叙述特征与统计，丢弃样本原文与溯源。"""
+    if not isinstance(profile, dict) or not profile:
+        return {}
+    compact: dict[str, Any] = {}
+    for key in _STYLE_PROFILE_INJECT_KEYS:
+        value = profile.get(key)
+        if value not in (None, "", [], {}):
+            compact[key] = value
+    return compact
+
+
 class NovelPipeline:
     def __init__(self, store: NovelStore, llm: LLMClient) -> None:
         self.store = store
         self.llm = llm
+        # 文风分析对瞬时网络错误（连接重置/超时/5xx）的有界重试退避秒数。
+        self.style_retry_delays = [3, 8, 20]
 
     def generate_novel_candidates(self, generation_profile: dict[str, Any]) -> dict[str, Any]:
         """Generate editable novel project candidates from search-style input."""
@@ -1029,10 +1071,12 @@ class NovelPipeline:
         context = self._with_retrieval_trace(
             retrieve_context(self.store, project_id, chapter["id"], section_id, section.get("goal", ""), self.llm)
         )
-        result = self._call(
-            "draft_writer",
-            {"project": project, "chapter": chapter, "section": section, "context": context, "mode": mode},
-        )
+        draft_payload = {"project": project, "chapter": chapter, "section": section, "context": context, "mode": mode}
+        scene_brief = self._latest_scene_brief(project_id, section_id)
+        if scene_brief:
+            draft_payload["scene_brief"] = scene_brief
+        with self.llm.override_params(self._style_sampling_overrides(project)):
+            result = self._call("draft_writer", self._with_style_profile(draft_payload))
         content = result.get("content", "")
         version_id = self.store.save_version(
             {
@@ -1063,9 +1107,11 @@ class NovelPipeline:
         context = self._with_retrieval_trace(
             retrieve_context(self.store, project_id, chapter["id"], section_id, section.get("goal", ""), self.llm)
         )
-        payload = self._with_project_writing_constraints(
-            {"project": project, "chapter": chapter, "section": section, "context": context, "mode": mode}
-        )
+        stream_payload = {"project": project, "chapter": chapter, "section": section, "context": context, "mode": mode}
+        scene_brief = self._latest_scene_brief(project_id, section_id)
+        if scene_brief:
+            stream_payload["scene_brief"] = scene_brief
+        payload = self._with_style_profile(self._with_project_writing_constraints(stream_payload))
         messages = build_messages("draft_writer", payload, output_json=False)
         _append_to_first_system_before_user(messages, "这次只输出正文内容本身，不要输出 JSON、标题、说明或寒暄。")
         model = self.llm.config.get("chat_model") or self.llm.config.get("review_model") or ""
@@ -1077,7 +1123,8 @@ class NovelPipeline:
                 on_delta(delta)
 
         try:
-            content = self.llm.stream_text(model, messages, collect)
+            with self.llm.override_params(self._style_sampling_overrides(project)):
+                content = self.llm.stream_text(model, messages, collect)
             result = {"content": content or "".join(chunks), "notes": "streaming"}
             self.store.save_llm_call_log(
                 {
@@ -1124,7 +1171,13 @@ class NovelPipeline:
         context = self._with_retrieval_trace(
             retrieve_context(self.store, project_id, chapter["id"], section_id, section.get("goal", ""), self.llm)
         )
-        result = self._call("reviewer", {"project": project, "section": section, "draft": version["content"], "context": context})
+        with self.llm.override_params(self._style_sampling_overrides(project)):
+            result = self._call(
+                "reviewer",
+                self._with_style_profile(
+                    {"project": project, "section": section, "draft": version["content"], "context": context}
+                ),
+            )
         issues = validate_review_issues(result)
         saved_id = self.store.save_version(
             {
@@ -1165,7 +1218,8 @@ class NovelPipeline:
         request["project"] = project
         draft_metadata = self._loads(draft.get("metadata_json"))
         request["retrieved_world_items"] = draft_metadata.get("retrieved_world_items", [])
-        result = self._call("rewriter", request)
+        with self.llm.override_params(self._style_sampling_overrides(project)):
+            result = self._call("rewriter", self._with_style_profile(request))
         chapter_id = section["chapter_id"]
         saved_id = self.store.save_version(
             {
@@ -1217,6 +1271,312 @@ class NovelPipeline:
             }
         )
         return {"version_id": version_id, **result}
+
+    def estimate_style_cost(
+        self,
+        sample_texts: list[str],
+        sample_count: int = 12,
+    ) -> dict[str, int]:
+        """分析前的成本预估：抽样块数与近似输入 token。"""
+        texts = [t for t in (sample_texts or [])]
+        if not texts:
+            return {"sampled_chunks": 0, "approx_input_tokens": 0}
+        per = max(1, round(sample_count / len(texts)))
+        sampled_chunks = 0
+        sampled_chars = 0
+        for text in texts:
+            picked = sample_chunks(chunk(clean_text(text)), per)
+            sampled_chunks += len(picked)
+            sampled_chars += sum(len(piece["text"]) for piece in picked)
+        return {"sampled_chunks": sampled_chunks, "approx_input_tokens": round(sampled_chars * 0.6)}
+
+    def analyze_style_chunk(
+        self,
+        chunk_text: str,
+        context: dict[str, Any] | None = None,
+        on_delta: Any = None,
+    ) -> dict[str, Any]:
+        """Map：流式分析单个样本片段，返回局部文风观察。"""
+        model = (
+            self.llm.config.get("style_model")
+            or self.llm.config.get("chat_model")
+            or self.llm.config.get("review_model")
+            or ""
+        )
+        payload = {"sample_excerpt": chunk_text, "context": context or {}}
+        return self._style_stream_json("style_analyzer_chunk", payload, model, on_delta)
+
+    def build_style_profile(
+        self,
+        observations: list[dict[str, Any]],
+        local_metrics: dict[str, Any],
+        context: dict[str, Any] | None = None,
+        on_delta: Any = None,
+    ) -> dict[str, Any]:
+        """Reduce：流式把多段局部观察 + 本地统计聚合成项目级文风画像。"""
+        model = (
+            self.llm.config.get("style_model")
+            or self.llm.config.get("review_model")
+            or self.llm.config.get("chat_model")
+            or ""
+        )
+        payload = {
+            "chunk_observations": observations,
+            "metrics": local_metrics,
+            "context": context or {},
+        }
+        profile = dict(self._style_stream_json("style_profile_builder", payload, model, on_delta))
+        profile.setdefault("version", 1)
+        profile["source"] = "file_ingest"
+        profile["metrics"] = local_metrics
+        profile["sampling"] = recommend_sampling(local_metrics)
+        return profile
+
+    def _style_stream_json(
+        self,
+        agent_name: str,
+        payload: dict[str, Any],
+        model: str,
+        on_delta: Any = None,
+    ) -> dict[str, Any]:
+        """以流式方式调用文风 Agent 并累积成 JSON，过程中把增量回传 on_delta。"""
+        messages = build_messages(agent_name, payload)
+        schema = SCHEMA_HINTS.get(agent_name)
+        if schema:
+            _append_to_first_system_before_user(
+                messages,
+                "输出必须是 JSON object，字段要求："
+                + json.dumps(schema, ensure_ascii=False)
+                + "。流式输出时仍只输出这个 JSON object，不要输出说明、寒暄或 Markdown 代码块。",
+            )
+        chunks: list[str] = []
+
+        def collect(delta: str) -> None:
+            chunks.append(delta)
+            if on_delta:
+                on_delta(delta)
+
+        text = self.llm.stream_text(model, messages, collect)
+        raw = text or "".join(chunks)
+        return parse_json_response(raw)
+
+    def analyze_style_samples(
+        self,
+        style_name: str,
+        samples: list[dict[str, Any]],
+        *,
+        sample_count: int = 12,
+        on_progress: Any = None,
+        on_delta: Any = None,
+        persist: bool = True,
+        root: Any = style_library.DEFAULT_STYLES_ROOT,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """编排：清洗→抽样→Map→Reduce→（可选）落盘到全局文风库 styles/<name>/。
+
+        samples: [{"name": str, "text": str, "sha1": optional str}]。
+        对瞬时网络错误（连接重置/超时/5xx）做有界重试，避免单次 10054 中断整轮分析。
+        若已有画像的 source_files sha1 与本次相同，直接返回缓存，不重复调用 LLM。
+        """
+        sample_list = list(samples or [])
+        cleaned_texts: list[str] = []
+        source_files: list[dict[str, Any]] = []
+        for sample in sample_list:
+            raw = str(sample.get("text", "") or "")
+            cleaned = clean_text(raw)
+            cleaned_texts.append(cleaned)
+            source_files.append(
+                {
+                    "name": str(sample.get("name", "") or ""),
+                    "sha1": str(sample.get("sha1") or text_sha1(raw)),
+                    "chars": len(cleaned),
+                }
+            )
+        if persist and style_name:
+            cached = style_library.load_style_profile(style_name, root)
+            if cached and self._same_source_sha1s(cached.get("source_files"), source_files):
+                return cached
+
+        observations: list[dict[str, Any]] = []
+        per = max(1, round(sample_count / len(sample_list))) if sample_list else 0
+        for cleaned in cleaned_texts:
+            for piece in sample_chunks(chunk(cleaned), per):
+                index = len(observations) + 1
+                observations.append(
+                    self._style_analysis_retry(
+                        lambda text=piece["text"]: self.analyze_style_chunk(text, context, on_delta),
+                        "style_analyzer_chunk",
+                        f"文风分析·Map 第{index}段[{style_name}]",
+                    )
+                )
+                if on_progress:
+                    on_progress(len(observations))
+
+        local_metrics = metrics("\n".join(cleaned_texts))
+        profile = self._style_analysis_retry(
+            lambda: self.build_style_profile(observations, local_metrics, context, on_delta),
+            "style_profile_builder",
+            f"文风分析·Reduce 聚合[{style_name}]",
+        )
+        profile["source_files"] = source_files
+        if persist and style_name:
+            style_library.write_style_profile(style_name, profile, root)
+        return profile
+
+    def _style_analysis_retry(self, action: Any, agent_name: str, stage: str) -> Any:
+        """对文风分析的单次 LLM 调用做有界重试，仅重试瞬时网络/服务端错误。
+
+        每次成功/失败都写入 LLM 调用日志，便于在“日志”页定位是哪一段、哪次重试断开。
+        """
+        delays = self.style_retry_delays or [0]
+        attempts = len(delays) + 1
+        for attempt in range(attempts):
+            try:
+                result = action()
+            except LLMError as exc:
+                text = str(exc)
+                transient = (
+                    "连接失败" in text
+                    or "连接被" in text
+                    or "重置" in text
+                    or "读取响应超时" in text
+                    or "timed out" in text.lower()
+                    or any(
+                        f"HTTP {code}" in text
+                        for code in ("429", "500", "502", "503", "504", "524")
+                    )
+                )
+                final = (not transient) or (attempt == attempts - 1)
+                label = stage if final else f"{stage} 重试#{attempt + 1}"
+                self._log_style_call(agent_name, label, success=False, error=text)
+                if final:
+                    raise
+                time.sleep(delays[min(attempt, len(delays) - 1)])
+            else:
+                self._log_style_call(agent_name, stage, success=True)
+                return result
+
+    def _log_style_call(
+        self,
+        agent_name: str,
+        stage: str,
+        *,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        """把文风分析调用写入 LLM 调用日志；store 缺失或失败时静默跳过。"""
+        store = getattr(self, "store", None)
+        if store is None or not hasattr(store, "save_llm_call_log"):
+            return
+        config = getattr(self.llm, "config", {}) or {}
+        model = (
+            config.get("style_model")
+            or config.get("chat_model")
+            or config.get("review_model")
+            or ""
+        )
+        try:
+            store.save_llm_call_log(
+                {
+                    "project_id": None,
+                    "agent_name": agent_name,
+                    "model": model,
+                    "request_summary": stage,
+                    "response_summary": "ok" if success else "",
+                    "success": success,
+                    "error": error,
+                }
+            )
+        except Exception:  # noqa: BLE001 - logging must never break analysis
+            pass
+
+    def _with_style_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """若项目引用了全局文风(style_ref)，把精简画像注入 payload（不含样本原文）。"""
+        project = payload.get("project")
+        if not project:
+            return payload
+        style_ref = str(project.get("style_ref", "") or "").strip()
+        if not style_ref:
+            return payload
+        compact = compact_style_profile(style_library.load_style_profile(style_ref))
+        if not compact:
+            return payload
+        return {**payload, "style_profile": compact}
+
+    def _latest_scene_brief(self, project_id: int, section_id: int) -> dict[str, Any] | None:
+        """本节最近一次场景导演方案(section_plan 版本的结构化 metadata)，供正文按场景结构写。"""
+        versions = self.store.list_versions(project_id, section_id=section_id, kind="section_plan")
+        if not versions:
+            return None
+        meta = self._loads(versions[0].get("metadata_json"))
+        return meta or None
+
+    def automate_review_rewrite(
+        self,
+        project_id: int,
+        section_id: int,
+        draft_version_id: int,
+        rewrite_mode: str,
+        preserve: list[str] | None = None,
+        direction: str = "",
+        max_rounds: int = 2,
+    ) -> dict[str, Any]:
+        """审稿→改写，若仍有高严重度问题则再复审改写，最多 max_rounds 轮。"""
+        version_to_review = int(draft_version_id)
+        last_rewrite: dict[str, Any] | None = None
+        last_review_version_id: int | None = None
+        review_rounds = 0
+        rewrite_count = 0
+        for index in range(max(1, max_rounds)):
+            review = self.review_section(project_id, section_id, version_to_review)
+            review_rounds += 1
+            last_review_version_id = int(review["version_id"])
+            high = any(str(issue.get("severity")) == "high" for issue in review.get("issues", []))
+            if index > 0 and not high:
+                break  # 上一轮改写后已无高严重度问题
+            rewrite = self.rewrite_section(
+                project_id, section_id, version_to_review, int(review["version_id"]),
+                rewrite_mode, preserve or [], direction,
+            )
+            last_rewrite = rewrite
+            rewrite_count += 1
+            version_to_review = int(rewrite["version_id"])
+            if not high:
+                break  # 首轮即无高严重度问题，改一次即可
+        return {
+            "rewrite": last_rewrite,
+            "review_version_id": last_review_version_id,
+            "review_rounds": review_rounds,
+            "rewrite_count": rewrite_count,
+        }
+
+    def _style_sampling_overrides(self, project: dict[str, Any] | None) -> dict[str, Any]:
+        """项目所引用文风推荐的采样参数（temperature/top_p/penalties），无则返回 {}。"""
+        if not project:
+            return {}
+        style_ref = str(project.get("style_ref", "") or "").strip()
+        if not style_ref:
+            return {}
+        profile = style_library.load_style_profile(style_ref)
+        sampling = profile.get("sampling") if isinstance(profile, dict) else None
+        if not isinstance(sampling, dict):
+            return {}
+        keys = ("temperature", "top_p", "top_k", "presence_penalty", "frequency_penalty")
+        return {key: sampling[key] for key in keys if sampling.get(key) is not None}
+
+    @staticmethod
+    def _same_source_sha1s(existing: Any, current: Any) -> bool:
+        def sha1_set(value: Any) -> set[str]:
+            if not isinstance(value, list):
+                return set()
+            return {
+                str(item.get("sha1"))
+                for item in value
+                if isinstance(item, dict) and item.get("sha1")
+            }
+
+        new = sha1_set(current)
+        return bool(new) and sha1_set(existing) == new
 
     def _call(self, agent_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         payload = self._with_project_writing_constraints(payload)

@@ -6,6 +6,7 @@ from typing import Any
 
 from .llm import LLMClient, LLMError
 from .storage import NovelStore
+from .style_ingest import overused_motifs
 from .style_tags import selected_tag_definitions
 from .world_modules import extract_required_state_modules
 
@@ -151,7 +152,21 @@ def retrieve_context(
         deduped.append(item)
     deduped = rank_world_items(deduped, query)
     forbidden = store.list_world_items(project_id, "forbidden")
-    recent_plot = store.list_versions(project_id, chapter_id=chapter_id)[0:5] if chapter_id else []
+    # AC-002：近期剧情只取已定稿正文，去掉 review/section_plan 噪声，按小节顺序取最近几节。
+    recent_plot = store.list_finalized_section_versions(chapter_id)[-5:] if chapter_id else []
+    # AC-001：紧邻的上一节定稿正文（跨章），用于续写衔接与情绪接续。
+    previous_section = None
+    if section is not None and chapter_id is not None:
+        prev = store.previous_finalized_section(project_id, chapter_id, int(section.get("number") or 0))
+        if prev:
+            content = str(prev.get("content") or "")
+            previous_section = {
+                "number": prev.get("section_number"),
+                "title": prev.get("section_title"),
+                "content_tail": content[-1500:],
+                "emotion": str(prev.get("emotion_shift") or ""),
+                "overused_motifs": overused_motifs(content),
+            }
     project = store.get_project(project_id) or {}
     active_tags = selected_tag_definitions(project)
     state_modules = extract_required_state_modules(deduped + forbidden, active_tags)
@@ -160,6 +175,7 @@ def retrieve_context(
         "state_modules": state_modules,
         "active_style_tags": active_tags,
         "recent_plot": recent_plot,
+        "previous_section": previous_section,
         "current_scene": {"chapter": chapter, "section": section},
         "forbidden": forbidden[:limit],
         "retrieval_notes": notes,

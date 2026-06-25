@@ -58,13 +58,160 @@ class FakeStreamResponse:
         return iter(self.lines)
 
 
+class ConnectionResetResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self) -> bytes:
+        raise ConnectionResetError(10054, "远程主机关闭了一个现有的连接")
+
+    def __iter__(self):
+        raise ConnectionResetError(10054, "远程主机关闭了一个现有的连接")
+
+
 class LLMTests(unittest.TestCase):
+    def test_connection_reset_becomes_retryable_llm_error(self) -> None:
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "chat_model": "writer",
+            }
+        )
+        with patch("urllib.request.urlopen", return_value=ConnectionResetResponse()):
+            with self.assertRaises(LLMError) as ctx:
+                client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+        self.assertTrue(client._is_connection_closed_error(ctx.exception))
+
+    def test_connection_reset_retries_until_cancel_succeeds(self) -> None:
+        attempts = []
+
+        def fake_urlopen(req, timeout):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return ConnectionResetResponse()
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "chat_model": "writer",
+            }
+        )
+        client.configure_retry_until_cancel(threading.Event(), delays=[0])
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+        self.assertEqual(result, {"result": "ok"})
+        self.assertEqual(len(attempts), 2)
+
+
     def test_parse_json_response_strips_code_fence(self) -> None:
         self.assertEqual(parse_json_response("```json\n{\"ok\": true}\n```"), {"ok": True})
 
     def test_parse_json_response_rejects_non_json(self) -> None:
         with self.assertRaises(LLMError):
             parse_json_response("not json")
+
+    def test_model_for_agent_style_routing(self) -> None:
+        base = LLMClient({"chat_model": "chat", "review_model": "review"})
+        # without style_model: Reduce falls back to review, Map to chat
+        self.assertEqual(base._model_for_agent("style_profile_builder"), "review")
+        self.assertEqual(base._model_for_agent("style_analyzer_chunk"), "chat")
+        # with style_model: both style agents use it
+        styled = LLMClient({"chat_model": "chat", "review_model": "review", "style_model": "strong"})
+        self.assertEqual(styled._model_for_agent("style_profile_builder"), "strong")
+        self.assertEqual(styled._model_for_agent("style_analyzer_chunk"), "strong")
+        # unrelated agents unaffected
+        self.assertEqual(styled._model_for_agent("draft_writer"), "chat")
+        self.assertEqual(styled._model_for_agent("reviewer"), "review")
+
+    def test_override_params_apply_to_chat_completions(self) -> None:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "chat_model": "writer",
+                "temperature": 0.7,
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with client.override_params({"temperature": 0.95, "top_p": 0.93, "frequency_penalty": 0.4}):
+                client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+        self.assertEqual(captured["payload"]["temperature"], 0.95)
+        self.assertEqual(captured["payload"]["top_p"], 0.93)
+        self.assertEqual(captured["payload"]["frequency_penalty"], 0.4)
+        # overrides restored afterwards
+        self.assertEqual(client._param_overrides, {})
+
+    def test_override_params_empty_keeps_config_defaults(self) -> None:
+        # 没设文风的项目 → 空覆盖 → 请求体仍用设置页默认值，互不影响。
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "chat_model": "writer",
+                "temperature": 0.7,
+                "top_p": 0.9,
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with client.override_params({}):
+                client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+        self.assertEqual(captured["payload"]["temperature"], 0.7)
+        self.assertEqual(captured["payload"]["top_p"], 0.9)
+
+    def test_override_params_restored_after_exception(self) -> None:
+        # 一个项目的覆盖即使中途报错也不会泄漏给下一个项目。
+        client = LLMClient({"base_url": "https://example.test/v1", "api_key": "key"})
+        with self.assertRaises(RuntimeError):
+            with client.override_params({"temperature": 0.95, "top_p": 0.93}):
+                self.assertEqual(client._param_overrides.get("temperature"), 0.95)
+                raise RuntimeError("boom")
+        self.assertEqual(client._param_overrides, {})
+
+    def test_override_params_reach_stream_payload(self) -> None:
+        captured = {}
+        lines = [b'data: {"choices":[{"delta":{"content":"x"}}]}\n', b"\n", b"data: [DONE]\n", b"\n"]
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeStreamResponse(lines)
+
+        client = LLMClient(
+            {
+                "base_url": "https://example.test/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "chat_model": "writer",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            with client.override_params({"top_p": 0.88, "presence_penalty": 0.3}):
+                client.stream_text("writer", [{"role": "user", "content": "x"}], lambda _d: None)
+        # stream payload normally omits these; override forces them in
+        self.assertEqual(captured["payload"]["top_p"], 0.88)
+        self.assertEqual(captured["payload"]["presence_penalty"], 0.3)
+        self.assertTrue(captured["payload"]["stream"])
 
     def test_default_api_type_is_responses(self) -> None:
         self.assertEqual(DEFAULT_LLM_CONFIG["api_type"], "responses")
@@ -300,6 +447,139 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(captured["payload"]["top_k"], 40)
         self.assertEqual(captured["payload"]["presence_penalty"], 0.3)
         self.assertEqual(captured["payload"]["frequency_penalty"], 0.2)
+
+    def test_deepseek_provider_disables_thinking_in_chat_completions(self) -> None:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://api.deepseek.com",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "provider": "deepseek",
+                "chat_model": "deepseek-v4-pro",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+
+        self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
+
+    def test_deepseek_provider_disables_thinking_in_stream_payload(self) -> None:
+        captured = {}
+        lines = [
+            'data: {"choices":[{"delta":{"content":"正文"}}]}\n'.encode("utf-8"),
+            b"\n",
+            b"data: [DONE]\n",
+            b"\n",
+        ]
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeStreamResponse(lines)
+
+        client = LLMClient(
+            {
+                "base_url": "https://api.deepseek.com",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "provider": "deepseek",
+                "chat_model": "deepseek-v4-pro",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.stream_text("deepseek-v4-pro", [{"role": "user", "content": "x"}], lambda _delta: None)
+
+        self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
+        self.assertTrue(captured["payload"]["stream"])
+
+    def test_openai_provider_does_not_send_thinking(self) -> None:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "provider": "openai",
+                "chat_model": "gpt-4.1",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+
+        self.assertNotIn("thinking", captured["payload"])
+
+    def test_custom_provider_disables_thinking_when_flag_set(self) -> None:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://aggregator.example/v1",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "provider": "custom",
+                "disable_thinking": True,
+                "chat_model": "deepseek-v4-pro",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+
+        self.assertEqual(captured["payload"]["thinking"], {"type": "disabled"})
+
+    def test_deepseek_provider_does_not_send_thinking_for_responses_api(self) -> None:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"output_text": "{\"result\": \"ok\"}"})
+
+        client = LLMClient(
+            {
+                "base_url": "https://api.deepseek.com",
+                "api_key": "key",
+                "api_type": "responses",
+                "provider": "deepseek",
+                "chat_model": "deepseek-v4-pro",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+
+        self.assertNotIn("thinking", captured["payload"])
+
+    def test_default_config_does_not_send_thinking(self) -> None:
+        captured = {}
+
+        def fake_urlopen(req, timeout):
+            captured["payload"] = json.loads(req.data.decode("utf-8"))
+            return FakeResponse({"choices": [{"message": {"content": "{\"result\": \"ok\"}"}}]})
+
+        client = LLMClient(
+            {
+                "base_url": "https://api.deepseek.com",
+                "api_key": "key",
+                "api_type": "chat_completions",
+                "chat_model": "deepseek-v4-pro",
+            }
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.chat_json("draft_writer", [{"role": "user", "content": "x"}])
+
+        self.assertNotIn("thinking", captured["payload"])
 
     def test_chat_json_merges_schema_hint_into_first_system_message(self) -> None:
         captured = {}

@@ -19,10 +19,13 @@ from .ui_logic import (
     API_TYPE_VALUES,
     LLM_CONFIG_FIELDS,
     PROJECT_TEXT_FIELDS,
+    PROVIDER_VALUES,
     STATUS_LABELS,
     api_type_display_value,
     build_llm_config_from_vars,
     build_world_context_query,
+    provider_default_api_type,
+    provider_display_value,
     calculate_default_section_target_words,
     config_var_value,
     format_character_card_choice,
@@ -426,6 +429,15 @@ class NovelDesktopUI:
             row = ttk.Frame(tab)
             row.pack(fill="x", pady=3)
             ttk.Label(row, text=label, width=20).pack(side="left")
+            if key == "provider":
+                var = tk.StringVar(value=provider_display_value(config.get(key)))
+                provider_box = ttk.Combobox(
+                    row, textvariable=var, values=PROVIDER_VALUES, state="readonly"
+                )
+                provider_box.pack(side="left", fill="x", expand=True)
+                provider_box.bind("<<ComboboxSelected>>", lambda _e: self._on_provider_changed())
+                self.config_vars[key] = var
+                continue
             if key == "api_type":
                 var = tk.StringVar(value=api_type_display_value(config.get(key)))
                 ttk.Combobox(row, textvariable=var, values=API_TYPE_VALUES, state="readonly").pack(
@@ -448,6 +460,11 @@ class NovelDesktopUI:
         self.model_scan_text = tk.Text(tab, height=8, wrap="word")
         self.model_scan_text.pack(fill="both", expand=True)
         self._style_widgets(tab)
+
+    def _on_provider_changed(self) -> None:
+        forced_api_type = provider_default_api_type(self.config_vars["provider"].get())
+        if forced_api_type and "api_type" in self.config_vars:
+            self.config_vars["api_type"].set(api_type_display_value(forced_api_type))
 
     def _build_logs_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=8)

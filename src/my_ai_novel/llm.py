@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import threading
@@ -83,6 +84,28 @@ class LLMClient:
         self.retry_delays = [5, 15, 30, 60]
         self.retry_timeout_delays = [30, 60, 90, 120]
         self._request_lock = threading.RLock()
+        # 临时采样参数覆盖（如项目文风推荐的 temperature/top_p/penalties）。
+        self._param_overrides: dict[str, Any] = {}
+
+    @contextlib.contextmanager
+    def override_params(self, overrides: dict[str, Any] | None):
+        """在 with 块内临时覆盖采样参数；退出后恢复。None 值忽略。"""
+        clean = {key: value for key, value in (overrides or {}).items() if value is not None}
+        if not clean:
+            yield
+            return
+        previous = self._param_overrides
+        self._param_overrides = {**previous, **clean}
+        try:
+            yield
+        finally:
+            self._param_overrides = previous
+
+    def _effective(self, key: str, default: Any) -> Any:
+        overrides = self._param_overrides
+        if key in overrides and overrides[key] is not None:
+            return overrides[key]
+        return self.config.get(key, default)
 
     def configure_retry_until_cancel(
         self,
@@ -107,6 +130,22 @@ class LLMClient:
         if raw in {"responses", "/responses"}:
             return "responses"
         return str(DEFAULT_LLM_CONFIG["api_type"])
+
+    def _thinking_disabled(self) -> bool:
+        """是否在 chat/completions 请求体注入 thinking:{"type":"disabled"}。
+
+        仅 chat_completions 协议有效（DeepSeek 不走 /responses）。
+        provider=deepseek 自动关闭思考；provider=openai 永不注入；
+        其余（custom/未设）由 disable_thinking 开关控制。
+        """
+        if self.api_type != "chat_completions":
+            return False
+        provider = str(self.config.get("provider", "") or "").strip().lower()
+        if provider == "deepseek":
+            return True
+        if provider == "openai":
+            return False
+        return bool(self.config.get("disable_thinking", False))
 
     def test_connection(self) -> tuple[bool, str]:
         try:
@@ -232,6 +271,20 @@ class LLMClient:
         return {"models": models, "source": "remote", "warning": ""}
 
     def _model_for_agent(self, agent_name: str) -> str:
+        if agent_name == "style_profile_builder":
+            return (
+                self.config.get("style_model")
+                or self.config.get("review_model")
+                or self.config.get("chat_model")
+                or ""
+            )
+        if agent_name == "style_analyzer_chunk":
+            return (
+                self.config.get("style_model")
+                or self.config.get("chat_model")
+                or self.config.get("review_model")
+                or ""
+            )
         if agent_name in {"reviewer", "rewriter", "chapter_architect", "global_architect"}:
             return self.config.get("review_model") or self.config.get("chat_model") or ""
         return self.config.get("chat_model") or self.config.get("review_model") or ""
@@ -374,7 +427,7 @@ class LLMClient:
         include_compat_fields: bool = True,
         stream: bool | None = None,
     ) -> dict[str, Any]:
-        temperature = float(self.config.get("temperature", 0.7))
+        temperature = float(self._effective("temperature", 0.7))
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -383,14 +436,23 @@ class LLMClient:
         }
         if stream is not None:
             payload["stream"] = stream
+        if self._thinking_disabled():
+            payload["thinking"] = {"type": "disabled"}
         if not include_compat_fields:
+            # 精简/流式 payload 默认不带这些字段；但若被显式覆盖（如文风推荐），仍需带上。
+            overrides = self._param_overrides
+            for key in ("top_p", "presence_penalty", "frequency_penalty"):
+                if overrides.get(key) is not None:
+                    payload[key] = float(overrides[key])
+            if overrides.get("top_k") not in (None, "", 0, "0"):
+                payload["top_k"] = int(overrides["top_k"])
             return payload
-        payload["top_p"] = float(self.config.get("top_p", 0.9))
-        payload["presence_penalty"] = float(self.config.get("presence_penalty", 0.0))
-        payload["frequency_penalty"] = float(self.config.get("frequency_penalty", 0.0))
+        payload["top_p"] = float(self._effective("top_p", 0.9))
+        payload["presence_penalty"] = float(self._effective("presence_penalty", 0.0))
+        payload["frequency_penalty"] = float(self._effective("frequency_penalty", 0.0))
         payload["response_format"] = {"type": "json_object"}
-        top_k = self.config.get("top_k")
-        if top_k not in (None, ""):
+        top_k = self._effective("top_k", None)
+        if top_k not in (None, "", 0, "0"):
             payload["top_k"] = int(top_k)
         return payload
 
@@ -415,19 +477,19 @@ class LLMClient:
             "max_output_tokens": max_tokens
             if max_tokens is not None
             else int(self.config.get("max_tokens", 2000)),
-            "temperature": float(self.config.get("temperature", 0.7)),
+            "temperature": float(self._effective("temperature", 0.7)),
         }
         if not include_writing_parameters:
             return payload
-        payload["top_p"] = float(self.config.get("top_p", 0.9))
-        presence_penalty = float(self.config.get("presence_penalty", 0.0))
-        frequency_penalty = float(self.config.get("frequency_penalty", 0.0))
+        payload["top_p"] = float(self._effective("top_p", 0.9))
+        presence_penalty = float(self._effective("presence_penalty", 0.0))
+        frequency_penalty = float(self._effective("frequency_penalty", 0.0))
         if presence_penalty:
             payload["presence_penalty"] = presence_penalty
         if frequency_penalty:
             payload["frequency_penalty"] = frequency_penalty
-        top_k = self.config.get("top_k")
-        if top_k not in (None, ""):
+        top_k = self._effective("top_k", None)
+        if top_k not in (None, "", 0, "0"):
             payload["top_k"] = int(top_k)
         return payload
 
@@ -524,6 +586,8 @@ class LLMClient:
             raise LLMError(self._format_timeout_error()) from exc
         except socket.timeout as exc:
             raise LLMError(self._format_timeout_error()) from exc
+        except (ConnectionError, OSError) as exc:
+            raise LLMError(f"连接失败：连接被远程主机重置或中断（{exc}）") from exc
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -553,6 +617,8 @@ class LLMClient:
             raise LLMError(self._format_timeout_error()) from exc
         except socket.timeout as exc:
             raise LLMError(self._format_timeout_error()) from exc
+        except (ConnectionError, OSError) as exc:
+            raise LLMError(f"连接失败：连接被远程主机重置或中断（{exc}）") from exc
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -594,6 +660,8 @@ class LLMClient:
             raise LLMError(self._format_timeout_error()) from exc
         except socket.timeout as exc:
             raise LLMError(self._format_timeout_error()) from exc
+        except (ConnectionError, OSError) as exc:
+            raise LLMError(f"连接失败：连接被远程主机重置或中断（{exc}）") from exc
 
     def _parse_sse_event(self, lines: list[str]):
         data_lines = []

@@ -29,11 +29,13 @@ WORLD_LABEL_TO_KIND["时间线"] = "timeline_event"
 
 LLM_CONFIG_FIELDS = [
     ("Base URL", "base_url"),
+    ("API 提供商", "provider"),
     ("API 类型", "api_type"),
     ("API Key", "api_key"),
     ("代理地址", "proxy_url"),
     ("正文模型", "chat_model"),
     ("架构/审稿模型", "review_model"),
+    ("文风模型(可选)", "style_model"),
     ("Embedding 模型", "embedding_model"),
     ("模型候选(每行一个)", "model_candidates"),
     ("超时秒数", "timeout_seconds"),
@@ -51,6 +53,14 @@ API_TYPE_CHOICES = {
 }
 API_TYPE_VALUES = tuple(API_TYPE_CHOICES.values())
 API_TYPE_LABELS_TO_CONFIG = {label: key for key, label in API_TYPE_CHOICES.items()}
+
+PROVIDER_CHOICES = {
+    "custom": "自定义",
+    "deepseek": "DeepSeek",
+    "openai": "OpenAI",
+}
+PROVIDER_VALUES = tuple(PROVIDER_CHOICES.values())
+PROVIDER_LABELS_TO_CONFIG = {label: key for key, label in PROVIDER_CHOICES.items()}
 
 PROJECT_TEXT_FIELDS = [
     ("总世界书", "world_summary"),
@@ -129,6 +139,37 @@ def normalize_api_type(value: Any) -> str:
     return API_TYPE_LABELS_TO_CONFIG.get(api_type, api_type) or default_api_type()
 
 
+def default_provider() -> str:
+    return str(DEFAULT_LLM_CONFIG.get("provider", "custom") or "custom")
+
+
+def provider_display_value(value: Any) -> str:
+    provider = str(value or default_provider()).strip()
+    return PROVIDER_CHOICES.get(provider, PROVIDER_CHOICES.get(default_provider(), provider))
+
+
+def normalize_provider(value: Any) -> str:
+    provider = str(value or default_provider()).strip()
+    if provider in PROVIDER_CHOICES:
+        return provider
+    return PROVIDER_LABELS_TO_CONFIG.get(provider, default_provider()) or default_provider()
+
+
+# 各提供商固定/默认使用的 API 类型；custom 不强制（返回 None，保留用户选择）。
+PROVIDER_API_TYPE = {
+    "deepseek": "chat_completions",
+    "openai": "responses",
+}
+
+
+def provider_default_api_type(value: Any) -> str | None:
+    """选某提供商时应切换到的 api_type；返回 None 表示不强制切换。
+
+    DeepSeek 这类只支持 /chat/completions 的提供商会返回 chat_completions。
+    """
+    return PROVIDER_API_TYPE.get(normalize_provider(value))
+
+
 def _is_blank_like(value: Any) -> bool:
     text = str(value).strip().lower()
     return text in {"", "none", "null", "nil", "undefined"}
@@ -140,6 +181,7 @@ def build_llm_config_from_vars(config_vars: dict[str, Any]) -> dict[str, Any]:
     for key, var in config_vars.items():
         config[key] = config_var_value(var)
     config["api_type"] = normalize_api_type(config.get("api_type"))
+    config["provider"] = normalize_provider(config.get("provider"))
     config["model_candidates"] = "\n".join(parse_model_candidates(str(config.get("model_candidates", ""))))
     for key in ["timeout_seconds", "max_tokens"]:
         raw_value = config.get(key)
@@ -154,6 +196,98 @@ def build_llm_config_from_vars(config_vars: dict[str, Any]) -> dict[str, Any]:
     top_k_value = config.get("top_k")
     config["top_k"] = None if _is_blank_like(top_k_value) else int(top_k_value)
     return config
+
+
+def format_style_cost(cost: dict[str, Any] | None) -> str:
+    data = cost or {}
+    chunks = int(data.get("sampled_chunks", 0) or 0)
+    tokens = int(data.get("approx_input_tokens", 0) or 0)
+    if chunks <= 0:
+        return "预估：暂无样本，导入 txt/epub 后显示成本"
+    return f"预估：抽样 {chunks} 段，约 {tokens:,} input tokens"
+
+
+def _style_section_text(section: Any, limit: int = 4) -> str:
+    """把画像里某个分节(dict)的非空文本/列表值拼成一行，便于概览展示。"""
+    if not isinstance(section, dict):
+        return ""
+    parts: list[str] = []
+    for value in section.values():
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+        elif isinstance(value, list):
+            parts.extend(str(item).strip() for item in value if str(item).strip())
+        if len(parts) >= limit:
+            break
+    return "｜".join(parts[:limit])
+
+
+def format_style_profile_overview(profile: dict[str, Any] | None) -> str:
+    if not profile:
+        return "尚未生成文风画像。导入样本后点“分析文风”。"
+    lines: list[str] = []
+    summary = str(profile.get("summary", "")).strip()
+    if summary:
+        lines.append("【摘要】" + summary)
+    for key, label in (
+        ("narrative", "叙述"),
+        ("sentence", "句式"),
+        ("dialogue", "对白"),
+        ("description", "描写"),
+        ("emotion", "情绪"),
+        ("pacing", "节奏"),
+    ):
+        text = _style_section_text(profile.get(key))
+        if text:
+            lines.append(f"【{label}】{text}")
+    metrics = profile.get("metrics") or {}
+    if isinstance(metrics, dict) and metrics:
+        lines.append(
+            "【统计】平均句长 {len}｜对白占比 {dlg}｜引号 {quote}".format(
+                len=metrics.get("avg_sentence_len", "-"),
+                dlg=metrics.get("dialogue_ratio", "-"),
+                quote=metrics.get("quote_style", "-"),
+            )
+        )
+    sampling = profile.get("sampling") or {}
+    if isinstance(sampling, dict) and sampling:
+        lines.append(
+            "【采样参数】temperature {t}｜top_p {p}｜presence {pp}｜frequency {fp}".format(
+                t=sampling.get("temperature", "-"),
+                p=sampling.get("top_p", "-"),
+                pp=sampling.get("presence_penalty", "-"),
+                fp=sampling.get("frequency_penalty", "-"),
+            )
+        )
+    rules = profile.get("anti_ai_rules") or []
+    if isinstance(rules, list) and rules:
+        lines.append("【反 AI 味】" + "；".join(str(rule) for rule in rules[:6]))
+    guides = profile.get("rewrite_guides") or []
+    if isinstance(guides, list) and guides:
+        lines.append("【改写顺序】" + "；".join(str(guide) for guide in guides[:6]))
+    sources = profile.get("source_files") or []
+    if isinstance(sources, list) and sources:
+        names = "、".join(str(item.get("name", "")) for item in sources if isinstance(item, dict) and item.get("name"))
+        if names:
+            lines.append("【来源】" + names)
+    return "\n".join(lines) if lines else "文风画像为空。"
+
+
+def style_guide_text_from_profile(profile: dict[str, Any] | None) -> str:
+    """把文风画像压成可写入项目“风格说明”的文本。"""
+    data = profile or {}
+    parts: list[str] = []
+    summary = str(data.get("summary", "")).strip()
+    if summary:
+        parts.append(summary)
+    for key, prefix in (("rewrite_guides", "改写倾向"), ("anti_ai_rules", "避免")):
+        values = data.get(key) or []
+        if isinstance(values, list):
+            for value in values:
+                text = str(value).strip()
+                if text:
+                    parts.append(f"- {prefix}：{text}")
+    return "\n".join(parts)
 
 
 def is_embedding_model(model_name: str) -> bool:

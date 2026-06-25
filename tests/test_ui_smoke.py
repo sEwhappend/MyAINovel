@@ -13,7 +13,14 @@ if str(SRC) not in sys.path:
 from my_ai_novel.ui import NovelDesktopUI
 from my_ai_novel.ui_logic import (
     PROJECT_TEXT_FIELDS,
+    PROVIDER_VALUES,
     build_llm_config_from_vars,
+    format_style_cost,
+    format_style_profile_overview,
+    normalize_provider,
+    provider_default_api_type,
+    provider_display_value,
+    style_guide_text_from_profile,
     build_world_context_query,
     calculate_default_section_target_words,
     format_export_success_message,
@@ -2005,6 +2012,98 @@ class UISmokeTests(unittest.TestCase):
 
     def test_llm_config_fields_include_api_type(self) -> None:
         self.assertIn("api_type", llm_config_field_keys())
+
+    def test_llm_config_fields_include_provider(self) -> None:
+        self.assertIn("provider", llm_config_field_keys())
+
+    def test_provider_choices_include_three_providers(self) -> None:
+        self.assertEqual(set(PROVIDER_VALUES), {"自定义", "DeepSeek", "OpenAI"})
+
+    def test_provider_display_value_maps_known_and_defaults(self) -> None:
+        self.assertEqual(provider_display_value("deepseek"), "DeepSeek")
+        self.assertEqual(provider_display_value("openai"), "OpenAI")
+        self.assertEqual(provider_display_value(""), "自定义")
+        self.assertEqual(provider_display_value(None), "自定义")
+
+    def test_normalize_provider_from_label(self) -> None:
+        self.assertEqual(normalize_provider("DeepSeek"), "deepseek")
+        self.assertEqual(normalize_provider("OpenAI"), "openai")
+        self.assertEqual(normalize_provider("自定义"), "custom")
+        self.assertEqual(normalize_provider(""), "custom")
+
+    def test_format_style_cost_with_samples(self) -> None:
+        text = format_style_cost({"sampled_chunks": 12, "approx_input_tokens": 25326})
+        self.assertIn("12", text)
+        self.assertIn("25,326", text)
+        self.assertIn("token", text.lower())
+
+    def test_format_style_cost_empty(self) -> None:
+        self.assertIn("暂无样本", format_style_cost({"sampled_chunks": 0, "approx_input_tokens": 0}))
+
+    def test_format_style_profile_overview_empty(self) -> None:
+        self.assertIn("尚未", format_style_profile_overview({}))
+
+    def test_format_style_profile_overview_rich(self) -> None:
+        profile = {
+            "summary": "短句快节奏，近距离第三人称",
+            "metrics": {"avg_sentence_len": 14.75, "dialogue_ratio": 0.25, "quote_style": "corner_quotes"},
+            "anti_ai_rules": ["避免段尾总结主题"],
+            "source_files": [{"name": "无职转生.txt", "sha1": "abc"}],
+        }
+        text = format_style_profile_overview(profile)
+        self.assertIn("短句快节奏", text)
+        self.assertIn("14.75", text)
+        self.assertIn("避免段尾总结主题", text)
+        self.assertIn("无职转生.txt", text)
+
+    def test_format_style_profile_overview_shows_deep_dimensions(self) -> None:
+        profile = {
+            "summary": "近距离第一人称",
+            "narrative": {"person": "first", "narrative_distance": "贴近即时感知"},
+            "dialogue": {"ratio_guideline": "地の文8会话2", "voice_distinction": "口癖区分明显"},
+            "pacing": {"hook": "章末留钩子"},
+        }
+        text = format_style_profile_overview(profile)
+        self.assertIn("贴近即时感知", text)
+        self.assertIn("地の文8会话2", text)
+        self.assertIn("章末留钩子", text)
+
+    def test_format_style_profile_overview_shows_sampling(self) -> None:
+        profile = {"summary": "x", "sampling": {"temperature": 0.95, "top_p": 0.93, "frequency_penalty": 0.4}}
+        text = format_style_profile_overview(profile)
+        self.assertIn("0.95", text)
+        self.assertIn("采样", text)
+
+    def test_style_guide_text_from_profile(self) -> None:
+        profile = {"summary": "近距离第三人称", "anti_ai_rules": ["避免段尾总结主题"]}
+        text = style_guide_text_from_profile(profile)
+        self.assertIn("近距离第三人称", text)
+        self.assertIn("避免段尾总结主题", text)
+
+    def test_provider_default_api_type_maps_providers(self) -> None:
+        self.assertEqual(provider_default_api_type("deepseek"), "chat_completions")
+        self.assertEqual(provider_default_api_type("DeepSeek"), "chat_completions")
+        self.assertEqual(provider_default_api_type("openai"), "responses")
+        self.assertEqual(provider_default_api_type("OpenAI"), "responses")
+        self.assertIsNone(provider_default_api_type("custom"))
+        self.assertIsNone(provider_default_api_type("自定义"))
+        self.assertIsNone(provider_default_api_type(""))
+
+    def test_build_llm_config_from_vars_normalizes_provider(self) -> None:
+        config = build_llm_config_from_vars(
+            {
+                "provider": FakeVar("DeepSeek"),
+                "api_type": FakeVar("/chat/completions"),
+                "timeout_seconds": FakeVar("30"),
+                "max_tokens": FakeVar("2048"),
+                "temperature": FakeVar("0.8"),
+                "top_p": FakeVar("0.9"),
+                "top_k": FakeVar(""),
+                "presence_penalty": FakeVar("0.1"),
+                "frequency_penalty": FakeVar("0.2"),
+            }
+        )
+        self.assertEqual(config["provider"], "deepseek")
 
     def test_llm_config_fields_include_model_candidates(self) -> None:
         self.assertIn("model_candidates", llm_config_field_keys())

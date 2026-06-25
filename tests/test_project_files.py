@@ -13,13 +13,19 @@ if str(SRC) not in sys.path:
 
 
 from my_ai_novel.project_files import (  # noqa: E402
+    delete_style_sample,
     ensure_project_structure,
+    load_style_profile,
+    load_style_sample_text,
+    load_style_samples,
     project_path,
     sanitize_filename,
     sync_chapters,
     sync_library,
     sync_project_core,
     sync_versions,
+    write_style_profile,
+    write_style_sample,
 )
 
 
@@ -132,6 +138,60 @@ class ProjectFilesTests(unittest.TestCase):
         self.assertTrue((self.root / "project-42-雨夜-旧宅-第一卷" / "chapters" / "chapter-001-旧宅入口" / "section-002-走廊-回声.json").exists())
         self.assertEqual(version_paths[0].read_text(encoding="utf-8"), "雨线像针一样落下。\n")
         self.assertTrue(version_paths[0].with_suffix(".json").exists())
+
+
+class StyleSampleFilesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        TEST_OUTPUT.mkdir(exist_ok=True)
+        self.temp_dir = TEST_OUTPUT / f"style-files-{uuid.uuid4().hex}"
+        self.temp_dir.mkdir()
+        self.root = self.temp_dir / "projects"
+        self.project = {"id": 7, "title": "文风测试", "genre": "悬疑"}
+
+    def test_write_and_load_style_sample_roundtrip(self) -> None:
+        meta = {
+            "id": "sample-001",
+            "title": "样书A",
+            "source_type": "authorized",
+            "sha1": "abc123",
+            "char_count": 12,
+        }
+        write_style_sample(self.project, meta, "他推开门，雨水灌进来。", self.root)
+
+        samples = load_style_samples(self.project, self.root)
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["id"], "sample-001")
+        self.assertEqual(samples[0]["sha1"], "abc123")
+        self.assertIn("他推开门", load_style_sample_text(self.project, "sample-001", self.root))
+
+    def test_load_style_samples_excludes_profile_file(self) -> None:
+        write_style_sample(self.project, {"id": "sample-001"}, "正文一。", self.root)
+        write_style_profile(self.project, {"version": 1, "summary": "x"}, self.root)
+        samples = load_style_samples(self.project, self.root)
+        self.assertEqual([s["id"] for s in samples], ["sample-001"])
+
+    def test_delete_style_sample_removes_meta_and_text(self) -> None:
+        write_style_sample(self.project, {"id": "sample-001"}, "正文。", self.root)
+        delete_style_sample(self.project, "sample-001", self.root)
+        self.assertEqual(load_style_samples(self.project, self.root), [])
+        self.assertEqual(load_style_sample_text(self.project, "sample-001", self.root), "")
+
+    def test_write_and_load_style_profile_roundtrip(self) -> None:
+        profile = {
+            "version": 1,
+            "summary": "近距离第三人称，短句为主",
+            "metrics": {"avg_sentence_len": 14.7, "dialogue_ratio": 0.25},
+            "anti_ai_rules": ["避免段尾总结主题"],
+            "source_files": [{"name": "a.txt", "sha1": "abc123"}],
+        }
+        write_style_profile(self.project, profile, self.root)
+        loaded = load_style_profile(self.project, self.root)
+        self.assertEqual(loaded["summary"], profile["summary"])
+        self.assertEqual(loaded["metrics"]["avg_sentence_len"], 14.7)
+        self.assertEqual(loaded["source_files"][0]["sha1"], "abc123")
+
+    def test_load_style_profile_missing_returns_empty(self) -> None:
+        self.assertEqual(load_style_profile(self.project, self.root), {})
 
 
 if __name__ == "__main__":

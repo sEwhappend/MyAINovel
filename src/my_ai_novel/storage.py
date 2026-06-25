@@ -194,6 +194,7 @@ class NovelStore:
             "character_brief": "",
             "writing_style_guide": "",
             "global_concept": "",
+            "style_ref": "",
         }
         fields.update({key: value for key, value in data.items() if key in fields})
         for key in PROJECT_STYLE_TAG_FIELDS:
@@ -212,8 +213,8 @@ class NovelStore:
                     selected_style_tags, selected_forbidden_tags, dialogue_quote_style,
                     generation_profile_json,
                     world_summary, character_brief, writing_style_guide,
-                    global_concept, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    global_concept, style_ref, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 """,
                 tuple(fields[name] for name in fields),
             )
@@ -243,6 +244,7 @@ class NovelStore:
             "character_brief",
             "writing_style_guide",
             "global_concept",
+            "style_ref",
         }
         updates = {key: value for key, value in data.items() if key in allowed}
         if not updates:
@@ -741,6 +743,40 @@ class NovelStore:
             ).fetchall()
             return [_dict(row) for row in rows]
 
+    def previous_finalized_section(
+        self, project_id: int, chapter_id: int, section_number: int
+    ) -> dict[str, Any] | None:
+        """紧邻的上一节定稿（同章 number 更小的最近一节；本章无则取上一章最后定稿节）。"""
+        same_chapter_sql = """
+            SELECT s.number AS section_number, s.title AS section_title,
+                   s.emotion_shift AS emotion_shift, v.content AS content
+            FROM sections s JOIN versions v ON v.id = s.finalized_version_id
+            WHERE s.chapter_id=? AND s.status='finalized' AND s.number < ?
+            ORDER BY s.number DESC LIMIT 1
+        """
+        last_in_chapter_sql = """
+            SELECT s.number AS section_number, s.title AS section_title,
+                   s.emotion_shift AS emotion_shift, v.content AS content
+            FROM sections s JOIN versions v ON v.id = s.finalized_version_id
+            WHERE s.chapter_id=? AND s.status='finalized'
+            ORDER BY s.number DESC LIMIT 1
+        """
+        with self.connection() as conn:
+            row = conn.execute(same_chapter_sql, (chapter_id, section_number)).fetchone()
+            if row:
+                return _dict(row)
+            chapter = conn.execute("SELECT number FROM chapters WHERE id=?", (chapter_id,)).fetchone()
+            if not chapter:
+                return None
+            prev_chapter = conn.execute(
+                "SELECT id FROM chapters WHERE project_id=? AND number < ? ORDER BY number DESC LIMIT 1",
+                (project_id, chapter["number"]),
+            ).fetchone()
+            if not prev_chapter:
+                return None
+            row = conn.execute(last_in_chapter_sql, (prev_chapter["id"],)).fetchone()
+            return _dict(row) if row else None
+
     def delete_section(self, section_id: int) -> None:
         project_id = self._project_id_for_section(section_id)
         section = self.get_section(section_id)
@@ -914,8 +950,8 @@ class NovelStore:
                 selected_style_tags, selected_forbidden_tags, dialogue_quote_style,
                 generation_profile_json,
                 world_summary, character_brief, writing_style_guide,
-                global_concept, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                global_concept, style_ref, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -939,6 +975,7 @@ class NovelStore:
                 project.get("character_brief", ""),
                 project.get("writing_style_guide", ""),
                 project.get("global_concept", ""),
+                project.get("style_ref", ""),
                 project.get("created_at") or _now_sql(),
                 project.get("updated_at") or _now_sql(),
             ),
@@ -1375,6 +1412,7 @@ def init_db(db_path: str | Path = DEFAULT_DB_PATH) -> None:
             _ensure_column(conn, "projects", "selected_forbidden_tags", "TEXT NOT NULL DEFAULT '[]'")
             _ensure_column(conn, "projects", "dialogue_quote_style", "TEXT NOT NULL DEFAULT 'cn_quotes'")
             _ensure_column(conn, "projects", "generation_profile_json", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(conn, "projects", "style_ref", "TEXT NOT NULL DEFAULT ''")
     finally:
         conn.close()
 

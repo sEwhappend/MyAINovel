@@ -12,9 +12,11 @@ from .exporter import export_full_book_docx
 from .llm import LLMClient, load_llm_config, save_llm_config
 from .models import WORLD_ITEM_KINDS
 from .pipeline import NovelPipeline
+from . import style_library
 from .project_files import ensure_project_structure
 from .relation_graph import build_character_graph, build_event_graph
 from .retrieval import retrieve_context
+from .style_ingest import clean_text, parse_file, text_sha1
 from .style_tags import (
     DIALOGUE_QUOTE_STYLES,
     FIELD_TO_CATEGORY,
@@ -25,9 +27,15 @@ from .ui_logic import (
     API_TYPE_VALUES,
     LLM_CONFIG_FIELDS,
     PROJECT_TEXT_FIELDS,
+    PROVIDER_VALUES,
     STATUS_LABELS,
     api_type_display_value,
     build_llm_config_from_vars,
+    format_style_cost,
+    format_style_profile_overview,
+    provider_default_api_type,
+    provider_display_value,
+    style_guide_text_from_profile,
     build_world_context_query,
     calculate_default_section_target_words,
     format_export_success_message,
@@ -56,8 +64,10 @@ try:
         QComboBox,
         QDialog,
         QDialogButtonBox,
+        QFileDialog,
         QFormLayout,
         QFrame,
+        QInputDialog,
         QGraphicsEllipseItem,
         QGraphicsItem,
         QGraphicsLineItem,
@@ -1991,6 +2001,7 @@ if PYSIDE6_AVAILABLE:
             self._build_project_page()
             self._build_outline_page()
             self._build_world_page()
+            self._build_style_page()
             self._build_relation_graph_page()
             self._build_structure_page()
             self._build_writing_page()
@@ -2073,6 +2084,9 @@ if PYSIDE6_AVAILABLE:
                 widget = QLineEdit()
                 self.project_fields[key] = widget
                 form.addRow(label, widget)
+            self.project_style_combo = QComboBox()
+            form.addRow("使用文风", self.project_style_combo)
+            self._refresh_project_style_combo()
             right.addLayout(form)
             self.project_texts: dict[str, QTextEdit] = {}
             for label, key in PROJECT_TEXT_FIELDS:
@@ -2093,6 +2107,27 @@ if PYSIDE6_AVAILABLE:
                 actions.addWidget(self._button(text, callback))
             right.addLayout(actions)
             layout.addWidget(right_frame, 1)
+
+        def _refresh_project_style_combo(self, select: str | None = None) -> None:
+            if not hasattr(self, "project_style_combo"):
+                return
+            keep = select if select is not None else self._project_style_ref()
+            names = [item["name"] for item in style_library.list_styles()]
+            self.project_style_combo.blockSignals(True)
+            self.project_style_combo.clear()
+            self.project_style_combo.addItem("（不使用）")
+            self.project_style_combo.addItems(names)
+            if keep and keep in names:
+                self.project_style_combo.setCurrentText(keep)
+            else:
+                self.project_style_combo.setCurrentText("（不使用）")
+            self.project_style_combo.blockSignals(False)
+
+        def _project_style_ref(self) -> str:
+            if not hasattr(self, "project_style_combo"):
+                return ""
+            text = self.project_style_combo.currentText().strip()
+            return "" if text == "（不使用）" else text
 
         def _build_project_tag_controls(self, parent: QVBoxLayout) -> None:
             self.project_tag_summary = QLabel("未选择标签；对白引号：中文弯引号")
@@ -2217,6 +2252,251 @@ if PYSIDE6_AVAILABLE:
             splitter.setSizes([320, 680])
             self._sync_world_character_form_visibility()
 
+        def _build_style_page(self) -> None:
+            page = self._add_page("文风")
+            self.style_page = page
+            layout = QHBoxLayout(page)
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            layout.addWidget(splitter)
+
+            left_panel = QWidget()
+            left = QVBoxLayout(left_panel)
+            left.addWidget(QLabel("文风库（全局，独立于项目）"))
+            self.style_combo = QComboBox()
+            self.style_combo.currentTextChanged.connect(lambda _text: self.refresh_style_samples())
+            left.addWidget(self.style_combo)
+            style_buttons = QHBoxLayout()
+            style_buttons.addWidget(self._button("新建文风", self.new_style))
+            style_buttons.addWidget(self._button("删除文风", self.delete_style))
+            left.addLayout(style_buttons)
+            left.addWidget(QLabel("样本（txt / epub，仅保存清洗后文本）"))
+            self.style_sample_list = QListWidget()
+            self.style_sample_list.setObjectName("StyleSampleList")
+            left.addWidget(self.style_sample_list, 1)
+            left.addWidget(self._button("导入 txt/epub", self.import_style_sample))
+            left.addWidget(self._button("删除选中样本", self.delete_selected_style_sample))
+            self.style_cost_label = QLabel("预估：请先选择或新建文风")
+            self.style_cost_label.setWordWrap(True)
+            left.addWidget(self.style_cost_label)
+            splitter.addWidget(left_panel)
+
+            right_panel = QWidget()
+            right = QVBoxLayout(right_panel)
+            right.addWidget(QLabel("文风画像（用当前设置的 API 分析生成）"))
+            self.style_profile_view = QTextEdit()
+            self.style_profile_view.setReadOnly(True)
+            self.style_profile_view.setPlainText(format_style_profile_overview({}))
+            right.addWidget(self.style_profile_view, 1)
+            right.addWidget(QLabel("分析过程（流式）"))
+            self.style_stream_text = QTextEdit()
+            self.style_stream_text.setObjectName("StreamingOutput")
+            self.style_stream_text.setReadOnly(True)
+            self.style_stream_text.setMinimumHeight(120)
+            right.addWidget(self.style_stream_text)
+            self.style_project_label = QLabel("当前项目文风：未选择项目")
+            self.style_project_label.setWordWrap(True)
+            right.addWidget(self.style_project_label)
+            actions = QHBoxLayout()
+            for text, callback in [
+                ("分析文风（用当前 API）", self.analyze_style),
+                ("设为当前项目文风", self.set_current_project_style),
+                ("应用到风格说明", self.apply_style_to_project),
+            ]:
+                actions.addWidget(self._button(text, callback))
+            right.addLayout(actions)
+            splitter.addWidget(right_panel)
+            splitter.setStretchFactor(0, 1)
+            splitter.setStretchFactor(1, 2)
+            splitter.setSizes([340, 660])
+            self.refresh_style_list()
+
+        def _selected_style(self) -> str:
+            return self.style_combo.currentText().strip() if hasattr(self, "style_combo") else ""
+
+        def refresh_style_list(self, select: str | None = None) -> None:
+            if not hasattr(self, "style_combo"):
+                return
+            keep = select or self._selected_style()
+            names = [item["name"] for item in style_library.list_styles()]
+            self.style_combo.blockSignals(True)
+            self.style_combo.clear()
+            self.style_combo.addItems(names)
+            if keep and keep in names:
+                self.style_combo.setCurrentText(keep)
+            self.style_combo.blockSignals(False)
+            self.refresh_style_samples()
+            self._refresh_project_style_combo()
+
+        def new_style(self) -> None:
+            name, ok = QInputDialog.getText(self.window, "新建文风", "文风名称：")
+            if not ok or not name.strip():
+                return
+            style_library.create_style(name.strip())
+            self.refresh_style_list(select=name.strip())
+            self._ok(f"已新建文风：{name.strip()}")
+
+        def delete_style(self) -> None:
+            name = self._selected_style()
+            if not name:
+                self._error("请先选择要删除的文风")
+                return
+            confirm = QMessageBox.question(
+                self.window, "删除文风", f"确定删除文风「{name}」及其全部样本和画像？"
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            style_library.delete_style(name)
+            self.refresh_style_list()
+            self._ok(f"已删除文风：{name}")
+
+        def refresh_style_samples(self) -> None:
+            if not hasattr(self, "style_sample_list"):
+                return
+            self._update_style_project_label()
+            self.style_sample_list.clear()
+            name = self._selected_style()
+            if not name:
+                self.style_cost_label.setText("预估：请先选择或新建文风")
+                self.style_profile_view.setPlainText(format_style_profile_overview({}))
+                return
+            samples = style_library.load_style_samples(name)
+            texts: list[str] = []
+            for sample in samples:
+                title = str(sample.get("title") or sample.get("id") or "样本")
+                chars = sample.get("char_count", "?")
+                item = QListWidgetItem(f"{title}（{chars} 字）")
+                item.setData(Qt.ItemDataRole.UserRole, sample.get("id"))
+                self.style_sample_list.addItem(item)
+                texts.append(style_library.load_style_sample_text(name, str(sample.get("id"))))
+            cost = self.pipeline.estimate_style_cost(texts) if texts else {}
+            self.style_cost_label.setText(format_style_cost(cost))
+            self.style_profile_view.setPlainText(
+                format_style_profile_overview(style_library.load_style_profile(name))
+            )
+
+        def _update_style_project_label(self) -> None:
+            if not hasattr(self, "style_project_label"):
+                return
+            if not self.current_project_id:
+                self.style_project_label.setText("当前项目文风：未选择项目")
+                return
+            project = self.store.get_project(self.current_project_id) or {}
+            ref = str(project.get("style_ref", "") or "").strip()
+            self.style_project_label.setText(f"当前项目文风：{ref or '未设置'}")
+
+        def import_style_sample(self) -> None:
+            name = self._selected_style()
+            if not name:
+                self._error("请先选择或新建一个文风")
+                return
+            path, _selected = QFileDialog.getOpenFileName(
+                self.window, "选择文风参考文本", "", "文本/电子书 (*.txt *.epub);;所有文件 (*)"
+            )
+            if not path:
+                return
+            try:
+                raw = parse_file(path)
+            except Exception as exc:  # noqa: BLE001 - surfaced to UI
+                self._error(f"解析文件失败：{exc}")
+                return
+            cleaned = clean_text(raw)
+            if not cleaned.strip():
+                self._error("未从该文件解析到可用文本")
+                return
+            index = len(style_library.load_style_samples(name)) + 1
+            sample_id = f"sample-{index:03d}"
+            file_name = os.path.basename(path)
+            meta = {
+                "id": sample_id,
+                "title": os.path.splitext(file_name)[0][:60],
+                "file_name": file_name,
+                "source_type": "user_supplied",
+                "sha1": text_sha1(raw),
+                "char_count": len(cleaned),
+            }
+            style_library.write_style_sample(name, meta, cleaned)
+            self.refresh_style_samples()
+            self._ok(f"已导入文风样本：{meta['title']}")
+
+        def delete_selected_style_sample(self) -> None:
+            name = self._selected_style()
+            if not name:
+                self._error("请先选择文风")
+                return
+            item = self.style_sample_list.currentItem()
+            if item is None:
+                self._error("请先选择要删除的样本")
+                return
+            sample_id = item.data(Qt.ItemDataRole.UserRole)
+            style_library.delete_style_sample(name, str(sample_id))
+            self.refresh_style_samples()
+            self._ok("已删除文风样本")
+
+        def analyze_style(self) -> None:
+            name = self._selected_style()
+            if not name:
+                self._error("请先选择或新建一个文风")
+                return
+            samples_meta = style_library.load_style_samples(name)
+            if not samples_meta:
+                self._error("请先导入至少一个文风样本")
+                return
+            samples = [
+                {
+                    "name": str(meta.get("file_name") or meta.get("title") or meta.get("id")),
+                    "text": style_library.load_style_sample_text(name, str(meta.get("id"))),
+                    "sha1": meta.get("sha1"),
+                }
+                for meta in samples_meta
+            ]
+            self.bridge.stream.emit("style", "")
+            self._run_async(
+                lambda: self.pipeline.analyze_style_samples(
+                    name, samples, on_delta=lambda delta: self.bridge.stream.emit("style", delta)
+                ),
+                "正在用当前 API 流式分析文风，请稍候...",
+                "文风画像已生成",
+                self._after_analyze_style,
+            )
+
+        def _after_analyze_style(self, profile: Any) -> str:
+            overview = format_style_profile_overview(profile if isinstance(profile, dict) else {})
+            self.style_profile_view.setPlainText(overview)
+            self.refresh_style_samples()
+            self.refresh_logs()
+            return "文风画像已生成并保存到 styles/"
+
+        def set_current_project_style(self) -> None:
+            if not self.current_project_id:
+                self._error("请先创建或选择项目")
+                return
+            name = self._selected_style()
+            if not name:
+                self._error("请先选择或新建一个文风")
+                return
+            self.store.update_project(self.current_project_id, {"style_ref": name})
+            self._update_style_project_label()
+            self._ok(f"当前项目已设为使用文风：{name}（写作时自动注入该文风画像）")
+
+        def apply_style_to_project(self) -> None:
+            if not self.current_project_id:
+                self._error("请先创建或选择项目")
+                return
+            name = self._selected_style()
+            if not name:
+                self._error("请先选择文风")
+                return
+            profile = style_library.load_style_profile(name)
+            if not profile:
+                self._error("该文风还没有画像，请先点“分析文风”")
+                return
+            text = style_guide_text_from_profile(profile)
+            if not text.strip():
+                self._error("文风画像内容为空，无法应用")
+                return
+            self._apply_project_patch_to_form({"writing_style_guide": text})
+            self._ok("已写入项目页“风格说明”，请到项目页确认后保存")
+
         def _build_relation_graph_page(self) -> None:
             page = self._add_page("关系图")
             self.relation_graph_page = page
@@ -2338,8 +2618,10 @@ if PYSIDE6_AVAILABLE:
             left.addLayout(section_actions)
             self.structure_auto_next_enabled = QCheckBox("自动切换到下一节写作")
             self.structure_auto_next_chapter_enabled = QCheckBox("自动切换到下一章写作")
+            self.structure_scene_plan_enabled = QCheckBox("自动化前先生成场景方案(更有结构,多一次调用)")
             left.addWidget(self.structure_auto_next_enabled)
             left.addWidget(self.structure_auto_next_chapter_enabled)
+            left.addWidget(self.structure_scene_plan_enabled)
             left.addWidget(self._button("从当前小节自动化写作", self.start_chapter_automation))
             left.addWidget(self._button("中断自动化写作", self.interrupt_chapter_automation))
             layout.addWidget(left_frame, 1)
@@ -2463,6 +2745,10 @@ if PYSIDE6_AVAILABLE:
                     widget.setMinimumHeight(110)
                     widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
                     widget.setPlainText(str(config.get(key, "")))
+                elif key == "provider":
+                    widget = QComboBox()
+                    widget.addItems(list(PROVIDER_VALUES))
+                    widget.setCurrentText(provider_display_value(config.get(key)))
                 elif key == "api_type":
                     widget = QComboBox()
                     widget.addItems(list(API_TYPE_VALUES))
@@ -2474,6 +2760,7 @@ if PYSIDE6_AVAILABLE:
                         widget.setEchoMode(QLineEdit.EchoMode.Password)
                 self.config_vars[key] = widget
                 form.addRow(label, widget)
+            self.config_vars["provider"].currentTextChanged.connect(self._on_provider_changed)
             layout.addLayout(form)
             actions = QHBoxLayout()
             for text, callback in [
@@ -2489,6 +2776,11 @@ if PYSIDE6_AVAILABLE:
             layout.addWidget(QLabel("可用模型"))
             layout.addWidget(self.model_scan_text)
             page_layout.addWidget(self._vertical_scroll_area(content))
+
+        def _on_provider_changed(self, _text: str = "") -> None:
+            forced_api_type = provider_default_api_type(self._text(self.config_vars["provider"]))
+            if forced_api_type:
+                self.config_vars["api_type"].setCurrentText(api_type_display_value(forced_api_type))
 
         def _build_logs_page(self) -> None:
             page = self._add_page("日志")
@@ -2557,6 +2849,7 @@ if PYSIDE6_AVAILABLE:
             data = {key: self._text(widget) for key, widget in self.project_fields.items()}
             data.update({key: self._text(widget) for key, widget in self.project_texts.items()})
             data.update(self._project_tag_data())
+            data["style_ref"] = self._project_style_ref()
             if self.current_project_id:
                 data["id"] = self.current_project_id
             return data
@@ -3049,6 +3342,7 @@ if PYSIDE6_AVAILABLE:
             for key, widget in self.project_texts.items():
                 self._set_text(widget, project.get(key, ""))
             self._set_project_tag_data(project)
+            self._refresh_project_style_combo(str(project.get("style_ref", "") or ""))
             self.pending_generation_profile_json = str(project.get("generation_profile_json", "") or "")
             self._load_outline_planning_defaults(project)
             self._clear_project_views()
@@ -3064,6 +3358,7 @@ if PYSIDE6_AVAILABLE:
                 self._set_text(widget, "")
             for widget in self.project_texts.values():
                 self._set_text(widget, "")
+            self._refresh_project_style_combo("")
             self._clear_project_tag_data()
             self.pending_generation_profile_json = ""
             self._clear_outline_planning_fields()
@@ -3102,6 +3397,7 @@ if PYSIDE6_AVAILABLE:
                 self.refresh_relation_graph()
             self._clear_structure_form()
             self._clear_world_form()
+            self.refresh_style_samples()
 
         def _clear_structure_form(self) -> None:
             for widget in self.structure_fields.values():
@@ -4011,6 +4307,7 @@ if PYSIDE6_AVAILABLE:
             section_id = self.current_section_id
             if self.writing_auto_enabled.isChecked():
                 direction = self.rewrite_direction_input.text().strip()
+                gen_scene_plan = self._scene_plan_enabled()
                 cancel_event = threading.Event()
                 self.automation_cancel_event = cancel_event
                 self._run_async(
@@ -4020,6 +4317,7 @@ if PYSIDE6_AVAILABLE:
                         self.rewrite_mode.currentText(),
                         cancel_event,
                         direction=direction,
+                        gen_scene_plan=gen_scene_plan,
                     ),
                     "正在自动生成、审稿、改写并定稿，请稍候...",
                     "自动化写作完成",
@@ -4159,6 +4457,7 @@ if PYSIDE6_AVAILABLE:
                 "outline_split": self.outline_split_preview,
                 "draft": self.current_generation_text,
                 "world_item": self.world_summary,
+                "style": getattr(self, "style_stream_text", None),
             }
             widgets.update(getattr(self, "_temporary_stream_targets", {}))
             widget = widgets.get(target)
@@ -4182,16 +4481,22 @@ if PYSIDE6_AVAILABLE:
             rewrite_mode: str,
             cancel_event: threading.Event | None = None,
             direction: str = "",
+            gen_scene_plan: bool = False,
         ) -> dict[str, Any]:
             self._raise_if_automation_cancelled(cancel_event)
+            if gen_scene_plan:
+                # AC-003：正文前先生成场景方案(scene_director)，draft 会按 scene_brief 的场景结构写。
+                self.pipeline.direct_scene(project_id, section_id)
+                self._raise_if_automation_cancelled(cancel_event)
             draft = self._run_streaming_draft(project_id, section_id)
             draft_version_id = int(draft["version_id"])
             self._raise_if_automation_cancelled(cancel_event)
-            review = self.pipeline.review_section(project_id, section_id, draft_version_id)
-            review_version_id = int(review["version_id"])
-            self._raise_if_automation_cancelled(cancel_event)
-            rewrite = self.pipeline.rewrite_section(project_id, section_id, draft_version_id, review_version_id, rewrite_mode, [], direction)
-            rewrite_version_id = int(rewrite["version_id"])
+            # AC-004：审稿→改写，若仍有高严重度问题则复审改写（上限多轮）。
+            review_rewrite = self.pipeline.automate_review_rewrite(
+                project_id, section_id, draft_version_id, rewrite_mode, [], direction
+            )
+            rewrite_version_id = int(review_rewrite["rewrite"]["version_id"])
+            review_version_id = review_rewrite.get("review_version_id")
             self._raise_if_automation_cancelled(cancel_event)
             self.store.finalize_section(section_id, rewrite_version_id)
             next_section = None
@@ -4204,9 +4509,14 @@ if PYSIDE6_AVAILABLE:
                 "draft_version_id": draft_version_id,
                 "review_version_id": review_version_id,
                 "rewrite_version_id": rewrite_version_id,
+                "review_rounds": review_rewrite.get("review_rounds"),
                 "next_section": next_section,
                 "next_message": next_message,
             }
+
+        def _scene_plan_enabled(self) -> bool:
+            box = getattr(self, "structure_scene_plan_enabled", None)
+            return bool(box.isChecked()) if box is not None else False
 
         def _run_single_writing_automation(
             self,
@@ -4215,10 +4525,11 @@ if PYSIDE6_AVAILABLE:
             rewrite_mode: str,
             cancel_event: threading.Event,
             direction: str = "",
+            gen_scene_plan: bool = False,
         ) -> dict[str, Any]:
             self._configure_llm_retry(cancel_event)
             try:
-                return self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction)
+                return self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction, gen_scene_plan)
             finally:
                 if hasattr(self.services.llm, "configure_retry_until_cancel"):
                     self.services.llm.configure_retry_until_cancel(None, None)
@@ -4242,6 +4553,7 @@ if PYSIDE6_AVAILABLE:
                     cancel_event,
                     self.structure_auto_next_chapter_enabled.isChecked(),
                     direction=self.rewrite_direction_input.text().strip(),
+                    gen_scene_plan=self._scene_plan_enabled(),
                 ),
                 "正在从当前小节开始自动化写作...",
                 "章节自动化写作完成",
@@ -4264,6 +4576,7 @@ if PYSIDE6_AVAILABLE:
             cancel_event: threading.Event,
             auto_next_chapter: bool = False,
             direction: str = "",
+            gen_scene_plan: bool = False,
         ) -> dict[str, Any]:
             processed: list[int] = []
             section_id = start_section_id
@@ -4274,7 +4587,7 @@ if PYSIDE6_AVAILABLE:
                     section = self.store.get_section(section_id)
                     if not section or int(section["chapter_id"]) != int(chapter_id):
                         break
-                    result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction)
+                    result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction, gen_scene_plan)
                     processed.append(section_id)
                     next_section = result.get("next_section")
                     if isinstance(next_section, dict) and int(next_section.get("chapter_id", chapter_id)) == int(chapter_id):
@@ -4584,6 +4897,7 @@ if PYSIDE6_AVAILABLE:
             self.refresh_relation_graph()
             self.refresh_structure()
             self.refresh_versions()
+            self.refresh_style_samples()
             self.refresh_logs()
 
         def _project_required(self) -> int | None:

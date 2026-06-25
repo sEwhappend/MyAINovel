@@ -9,6 +9,8 @@ from typing import Any, Iterable, Mapping
 
 DEFAULT_PROJECTS_ROOT = Path("projects")
 PROJECT_DIRS = ("outline", "library", "chapters", "versions", "exports")
+STYLE_SAMPLES_DIR = "style_samples"
+STYLE_PROFILE_FILE = "style_profile.json"
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -253,6 +255,105 @@ def write_version(
     _write_text(content_path, content)
     _write_json(content_path.with_suffix(".json"), _version_file_payload(version))
     return content_path
+
+
+def _style_samples_dir(project: Mapping[str, Any], root: Path) -> Path:
+    base = ensure_project_structure(project, root)
+    target = base / STYLE_SAMPLES_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _existing_style_dir(project: Mapping[str, Any], root: Path) -> Path | None:
+    base = find_project_path(project, root)
+    if base is None:
+        return None
+    target = base / STYLE_SAMPLES_DIR
+    return target if target.exists() else None
+
+
+def write_style_sample(
+    project: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    clean_text: str,
+    root: Path = DEFAULT_PROJECTS_ROOT,
+) -> Path:
+    target = _style_samples_dir(project, root)
+    sample_id = sanitize_filename(sample.get("id"), fallback="sample", max_length=60)
+    text_name = f"{sample_id}.clean.txt"
+    payload = {**dict(sample), "id": sample_id, "text_path": f"{STYLE_SAMPLES_DIR}/{text_name}"}
+    _write_text(target / text_name, str(clean_text or ""))
+    return _write_json(target / f"{sample_id}.json", payload)
+
+
+def load_style_samples(
+    project: Mapping[str, Any],
+    root: Path = DEFAULT_PROJECTS_ROOT,
+) -> list[dict[str, Any]]:
+    target = _existing_style_dir(project, root)
+    if target is None:
+        return []
+    samples: list[dict[str, Any]] = []
+    for path in sorted(target.glob("*.json")):
+        if path.name == STYLE_PROFILE_FILE:
+            continue
+        meta = _read_json(path)
+        if meta:
+            samples.append(meta)
+    return samples
+
+
+def load_style_sample_text(
+    project: Mapping[str, Any],
+    sample_id: str,
+    root: Path = DEFAULT_PROJECTS_ROOT,
+) -> str:
+    target = _existing_style_dir(project, root)
+    if target is None:
+        return ""
+    safe_id = sanitize_filename(sample_id, fallback="sample", max_length=60)
+    path = target / f"{safe_id}.clean.txt"
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").removesuffix("\n")
+
+
+def delete_style_sample(
+    project: Mapping[str, Any],
+    sample_id: str,
+    root: Path = DEFAULT_PROJECTS_ROOT,
+) -> None:
+    target = _existing_style_dir(project, root)
+    if target is None:
+        return
+    safe_id = sanitize_filename(sample_id, fallback="sample", max_length=60)
+    for suffix in (".json", ".clean.txt"):
+        path = target / f"{safe_id}{suffix}"
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+
+def write_style_profile(
+    project: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    root: Path = DEFAULT_PROJECTS_ROOT,
+) -> Path:
+    target = _style_samples_dir(project, root)
+    return _write_json(target / STYLE_PROFILE_FILE, profile)
+
+
+def load_style_profile(
+    project: Mapping[str, Any],
+    root: Path = DEFAULT_PROJECTS_ROOT,
+) -> dict[str, Any]:
+    target = _existing_style_dir(project, root)
+    if target is None:
+        return {}
+    path = target / STYLE_PROFILE_FILE
+    return _read_json(path) if path.exists() else {}
 
 
 def _load_library(base: Path) -> list[dict[str, Any]]:

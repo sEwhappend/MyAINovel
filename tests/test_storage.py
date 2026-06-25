@@ -21,6 +21,51 @@ class StorageTests(unittest.TestCase):
     def tearDown(self) -> None:
         pass
 
+    def _finalize_new_section(self, project_id, chapter_id, number, title, text):
+        section_id = self.store.save_section(chapter_id, {"number": number, "title": title, "emotion_shift": f"{title}:平静→紧张"})
+        version_id = self.store.save_version(
+            {"project_id": project_id, "chapter_id": chapter_id, "section_id": section_id,
+             "kind": "rewrite", "label": "定稿", "content": text}
+        )
+        self.store.finalize_section(section_id, version_id)
+        return section_id
+
+    def test_previous_finalized_section_same_chapter(self) -> None:
+        pid = self.store.create_project({"title": "续写"})
+        cid = self.store.save_chapter(pid, {"number": 1, "title": "章一"})
+        self._finalize_new_section(pid, cid, 1, "第一节", "他推开门，雨水灌进来。")
+        s2 = self.store.save_section(cid, {"number": 2, "title": "第二节"})
+        prev = self.store.previous_finalized_section(pid, cid, 2)
+        self.assertIsNotNone(prev)
+        self.assertEqual(prev["section_number"], 1)
+        self.assertIn("他推开门", prev["content"])
+
+    def test_previous_finalized_section_crosses_chapter(self) -> None:
+        pid = self.store.create_project({"title": "续写"})
+        c1 = self.store.save_chapter(pid, {"number": 1, "title": "章一"})
+        self._finalize_new_section(pid, c1, 1, "尾节", "她转身离开，灯光摇晃。")
+        c2 = self.store.save_chapter(pid, {"number": 2, "title": "章二"})
+        self.store.save_section(c2, {"number": 1, "title": "新章首节"})
+        prev = self.store.previous_finalized_section(pid, c2, 1)
+        self.assertIsNotNone(prev)
+        self.assertIn("她转身离开", prev["content"])  # 取到上一章末节
+
+    def test_previous_finalized_section_none_for_first(self) -> None:
+        pid = self.store.create_project({"title": "续写"})
+        cid = self.store.save_chapter(pid, {"number": 1, "title": "章一"})
+        self.store.save_section(cid, {"number": 1, "title": "首节"})
+        self.assertIsNone(self.store.previous_finalized_section(pid, cid, 1))
+
+    def test_project_style_ref_roundtrip(self) -> None:
+        project_id = self.store.create_project({"title": "引用文风", "style_ref": "轻小说体"})
+        self.assertEqual(self.store.get_project(project_id)["style_ref"], "轻小说体")
+        self.store.update_project(project_id, {"style_ref": "克制叙事"})
+        self.assertEqual(self.store.get_project(project_id)["style_ref"], "克制叙事")
+
+    def test_project_style_ref_defaults_empty(self) -> None:
+        project_id = self.store.create_project({"title": "无文风"})
+        self.assertEqual(self.store.get_project(project_id).get("style_ref", ""), "")
+
     def test_project_chapter_section_version_round_trip(self) -> None:
         project_id = self.store.create_project(
             {

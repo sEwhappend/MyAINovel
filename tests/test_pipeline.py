@@ -2,6 +2,7 @@ import json
 import sys
 import unittest
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,10 @@ TEST_OUTPUT = ROOT / "test-output"
 
 class FakeLLM:
     config = {"chat_model": "fake"}
+
+    @contextmanager
+    def override_params(self, overrides=None):
+        yield
 
     def chat_json(self, agent_name, messages, schema_hint=None):
         if agent_name == "global_architect":
@@ -354,6 +359,70 @@ class LegacySplitFakeLLM(FakeLLM):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_wc_followup_v2_dialogue_and_overused(self) -> None:
+        scene = AGENT_SYSTEM_PROMPTS["scene_director"]
+        self.assertIn("对白交锋", scene)
+        self.assertIn("dialogue", SCHEMA_HINTS["scene_director"])
+        self.assertIn("overused_motifs", AGENT_SYSTEM_PROMPTS["draft_writer"])
+        self.assertIn("overused_motifs", AGENT_SYSTEM_PROMPTS["reviewer"])
+
+    def test_wc_followup_rhythm_dialogue_repetition(self) -> None:
+        draft = AGENT_SYSTEM_PROMPTS["draft_writer"]
+        self.assertIn("长短交替", draft)   # 句长长短交替，别通篇短句
+        self.assertIn("对白占比", draft)   # 对白别过低
+        self.assertIn("体感意象", draft)   # 避免重复身体反应口癖
+        reviewer = AGENT_SYSTEM_PROMPTS["reviewer"]
+        self.assertIn("体感意象", reviewer)
+
+    def test_wc001_scene_director_has_scene_structure(self) -> None:
+        prompt = AGENT_SYSTEM_PROMPTS["scene_director"]
+        self.assertIn("场景目标", prompt)
+        self.assertIn("冲突", prompt)
+        self.assertIn("价值", prompt)  # 结尾价值/情绪须变
+        self.assertIn("意料之外", prompt)
+        schema = SCHEMA_HINTS["scene_director"]
+        self.assertIn("value_shift", schema)
+        self.assertIn("turn", schema)
+
+    def test_wc002_section_planner_defines_section_fields(self) -> None:
+        prompt = AGENT_SYSTEM_PROMPTS["section_planner"]
+        self.assertIn("可表演场景", prompt)
+        section_obj = SCHEMA_HINTS["section_planner"]["sections"][0]
+        for field in ("section_goal", "immediate_obstacle", "information_release", "emotion_shift", "ending_hook"):
+            self.assertIn(field, section_obj)
+
+    def test_wc003_chapter_architect_has_climax_and_curve(self) -> None:
+        prompt = AGENT_SYSTEM_PROMPTS["chapter_architect"]
+        self.assertIn("爽点", prompt)
+        self.assertIn("情绪", prompt)
+        schema = SCHEMA_HINTS["chapter_architect"]
+        self.assertIn("chapter_climax", schema)
+        self.assertIn("emotional_curve", schema)
+
+    def test_wc004_draft_writer_has_prose_craft(self) -> None:
+        prompt = AGENT_SYSTEM_PROMPTS["draft_writer"]
+        self.assertIn("不直接命名情绪", prompt)  # show don't tell
+        self.assertIn("潜台词", prompt)
+        self.assertIn("刺激", prompt)  # MRU 先刺激后反应
+        self.assertIn("禁用", prompt)  # 去AI味禁用清单
+
+    def test_wc005_reviewer_rewriter_align_new_craft(self) -> None:
+        reviewer = AGENT_SYSTEM_PROMPTS["reviewer"]
+        self.assertIn("价值不变", reviewer)
+        self.assertIn("出场顺序", reviewer)
+        rewriter = AGENT_SYSTEM_PROMPTS["rewriter"]
+        self.assertIn("showing", rewriter)
+        self.assertIn("转折", rewriter)
+
+    def test_serial_prompts_allow_introducing_new_characters(self) -> None:
+        splitter = AGENT_SYSTEM_PROMPTS["outline_splitter"]
+        self.assertIn("新角色", splitter)
+        self.assertIn("不是禁止", splitter)  # 密度上限≠禁止创建
+        self.assertIn("kind=character", splitter)
+        self.assertIn("existing_characters", splitter)
+        architect = AGENT_SYSTEM_PROMPTS["global_architect"]
+        self.assertIn("新的配角", architect)
+
     def assertSystemRuleBeforeFirstUser(self, messages, expected_content):
         first_user_index = next(index for index, message in enumerate(messages) if message["role"] == "user")
         self.assertEqual(first_user_index, 1)
@@ -370,6 +439,52 @@ class PipelineTests(unittest.TestCase):
         self.store = NovelStore(TEST_OUTPUT / f"pipeline_{uuid.uuid4().hex}.db")
         self.project_id = self.store.create_project({"title": "测试", "global_concept": "旧宅"})
         self.pipeline = NovelPipeline(self.store, FakeLLM())
+
+    def test_ac003_latest_scene_brief_from_section_plan_version(self) -> None:
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        sid = self.store.save_section(cid, {"number": 1, "title": "节一"})
+        self.store.save_version({
+            "project_id": self.project_id, "chapter_id": cid, "section_id": sid,
+            "kind": "section_plan", "label": "场景导演", "content": "场景方案",
+            "metadata": {"scene_goal": "进入旧塔", "turn": "门自己开了", "value_shift": {"from": "犹豫", "to": "恐惧"}},
+        })
+        brief = self.pipeline._latest_scene_brief(self.project_id, sid)
+        self.assertEqual(brief["scene_goal"], "进入旧塔")
+        self.assertIn("value_shift", brief)
+
+    def test_ac003_latest_scene_brief_none_when_absent(self) -> None:
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        sid = self.store.save_section(cid, {"number": 1, "title": "节一"})
+        self.assertIsNone(self.pipeline._latest_scene_brief(self.project_id, sid))
+
+    def test_ac004_review_rewrite_loops_on_high_severity(self) -> None:
+        class HighThenLowLLM(FakeLLM):
+            def __init__(self) -> None:
+                self.review_calls = 0
+
+            def chat_json(self, agent_name, messages, schema_hint=None):
+                if agent_name == "reviewer":
+                    self.review_calls += 1
+                    severity = "high" if self.review_calls == 1 else "low"
+                    return {"issues": [{"type": "pacing", "severity": severity, "location": "", "description": "x", "suggestion": "y"}], "summary": ""}
+                return super().chat_json(agent_name, messages, schema_hint)
+
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        sid = self.store.save_section(cid, {"number": 1, "title": "节一", "goal": "g"})
+        draft_v = self.store.save_version({"project_id": self.project_id, "chapter_id": cid, "section_id": sid, "kind": "draft", "label": "粗稿", "content": "草稿正文"})
+        pipe = NovelPipeline(self.store, HighThenLowLLM())
+        result = pipe.automate_review_rewrite(self.project_id, sid, draft_v, "降低AI味")
+        self.assertEqual(result["review_rounds"], 2)  # 高严重度→复审
+        self.assertEqual(result["rewrite_count"], 1)
+        self.assertIsNotNone(result["rewrite"])
+
+    def test_ac004_single_round_when_no_high_severity(self) -> None:
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        sid = self.store.save_section(cid, {"number": 1, "title": "节一", "goal": "g"})
+        draft_v = self.store.save_version({"project_id": self.project_id, "chapter_id": cid, "section_id": sid, "kind": "draft", "label": "粗稿", "content": "草稿"})
+        result = self.pipeline.automate_review_rewrite(self.project_id, sid, draft_v, "粗稿")
+        self.assertEqual(result["review_rounds"], 1)  # FakeLLM 审稿为 medium，不复审
+        self.assertEqual(result["rewrite_count"], 1)
 
     def test_generate_novel_candidates_uses_search_profile_and_schema(self) -> None:
         llm = InspectingFakeLLM()

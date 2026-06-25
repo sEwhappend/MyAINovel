@@ -22,9 +22,12 @@ DEFAULT_LLM_CONFIG = {
     "base_url": "",
     "api_key": "",
     "api_type": "responses",
+    "provider": "custom",
+    "disable_thinking": False,
     "chat_model": "",
     "review_model": "",
     "embedding_model": "",
+    "style_model": "",
     "model_candidates": "",
     "proxy_url": "",
     "timeout_seconds": 180,
@@ -43,9 +46,12 @@ class LLMConfig:
     base_url: str = ""
     api_key: str = ""
     api_type: str = "responses"
+    provider: str = "custom"
+    disable_thinking: bool = False
     chat_model: str = ""
     review_model: str = ""
     embedding_model: str = ""
+    style_model: str = ""
     model_candidates: str = ""
     proxy_url: str = ""
     timeout_seconds: int = 180

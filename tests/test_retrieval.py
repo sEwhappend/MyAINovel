@@ -21,6 +21,48 @@ class RetrievalTests(unittest.TestCase):
         self.store = NovelStore(TEST_OUTPUT / f"retrieval_{uuid.uuid4().hex}.db")
         self.project_id = self.store.create_project({"title": "测试"})
 
+    def test_context_includes_previous_finalized_section(self) -> None:
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        s1 = self.store.save_section(cid, {"number": 1, "title": "第一节", "emotion_shift": "平静→警觉"})
+        v1 = self.store.save_version(
+            {"project_id": self.project_id, "chapter_id": cid, "section_id": s1,
+             "kind": "rewrite", "label": "定稿", "content": "他推开门，雨水灌进来。"}
+        )
+        self.store.finalize_section(s1, v1)
+        s2 = self.store.save_section(cid, {"number": 2, "title": "第二节"})
+        pack = retrieve_context(self.store, self.project_id, cid, s2, "第二节")
+        prev = pack["previous_section"]
+        self.assertIsNotNone(prev)
+        self.assertIn("他推开门", prev["content_tail"])
+        self.assertEqual(prev["number"], 1)
+
+    def test_previous_section_flags_overused_motifs(self) -> None:
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        s1 = self.store.save_section(cid, {"number": 1, "title": "第一节"})
+        v1 = self.store.save_version({
+            "project_id": self.project_id, "chapter_id": cid, "section_id": s1,
+            "kind": "rewrite", "label": "定稿", "content": "月光下她攥紧手。月光。攥紧。月光照在地上。",
+        })
+        self.store.finalize_section(s1, v1)
+        s2 = self.store.save_section(cid, {"number": 2, "title": "第二节"})
+        prev = retrieve_context(self.store, self.project_id, cid, s2, "x")["previous_section"]
+        self.assertIn("月光", prev["overused_motifs"])
+
+    def test_recent_plot_only_finalized_prose(self) -> None:
+        cid = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        s1 = self.store.save_section(cid, {"number": 1, "title": "第一节"})
+        self.store.save_version({"project_id": self.project_id, "chapter_id": cid, "section_id": s1,
+                                 "kind": "review", "label": "审稿意见", "content": '{"issues": []}'})
+        self.store.save_version({"project_id": self.project_id, "chapter_id": cid, "section_id": s1,
+                                 "kind": "section_plan", "label": "场景导演", "content": "场景方案文本"})
+        v1 = self.store.save_version({"project_id": self.project_id, "chapter_id": cid, "section_id": s1,
+                                      "kind": "rewrite", "label": "定稿", "content": "正文定稿内容。"})
+        self.store.finalize_section(s1, v1)
+        pack = retrieve_context(self.store, self.project_id, cid, None, "x")
+        contents = [str(r.get("content", "")) for r in pack["recent_plot"]]
+        self.assertTrue(any("正文定稿内容" in c for c in contents))
+        self.assertFalse(any("issues" in c or "场景方案文本" in c for c in contents))
+
     def test_context_includes_keyword_and_forbidden_items(self) -> None:
         self.store.save_world_item(
             self.project_id,

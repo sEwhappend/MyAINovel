@@ -851,6 +851,36 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(details["identity"], "旧格式字段")
         self.assertEqual(details["chapter_memory"], ["保留"])
 
+    def test_project_files_rebuild_survives_duplicate_world_item_id(self) -> None:
+        # 复制项目文件夹时容易沿用同一个全局 world_items.id；重建缓存不应整库崩溃，
+        # 两个不同项目的不同实体都要保留（冲突的副本重新分配 id）。
+        project_a = self.store.create_project({"title": "项目甲"})
+        project_b = self.store.create_project({"title": "项目乙"})
+        item_a = self.store.save_world_item(
+            project_a, {"kind": "character", "name": "甲角色", "summary": "甲"}
+        )
+        item_b = self.store.save_world_item(
+            project_b, {"kind": "character", "name": "乙角色", "summary": "乙"}
+        )
+        self.assertNotEqual(item_a, item_b)
+
+        dir_b = self._project_dir(project_b)
+        old_file = dir_b / "library" / "character" / f"{item_b:04d}-乙角色.json"
+        data = json.loads(old_file.read_text(encoding="utf-8"))
+        data["id"] = item_a  # 制造与项目甲条目相同的全局 id
+        old_file.unlink()
+        (dir_b / "library" / "character" / f"{item_a:04d}-乙角色.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        rebuilt_db = TEST_OUTPUT / f"{self.case_id}_dup_rebuild.db"
+        rebuilt = NovelStore(rebuilt_db, projects_root=self.projects_root)
+
+        names_a = {it["name"] for it in rebuilt.list_world_items(project_a)}
+        names_b = {it["name"] for it in rebuilt.list_world_items(project_b)}
+        self.assertIn("甲角色", names_a)
+        self.assertIn("乙角色", names_b)
+
     def _project_dir(self, project_id: int) -> Path:
         project = self.store.get_project(project_id)
         project_dir = find_project_path(project, self.projects_root)

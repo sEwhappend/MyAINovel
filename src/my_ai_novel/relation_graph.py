@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from itertools import combinations
 from typing import Any, Iterable
@@ -382,7 +383,7 @@ def _add_same_scene_edges(
                     nodes.setdefault(node_id, _world_item_node(item, []))
                     ids.append(node_id)
             for left, right in combinations(sorted(set(ids)), 2):
-                _store_edge(edges, _edge(left, right, "same_scene", "same scene", "", 1, "inferred", [evidence]))
+                _store_edge(edges, _edge(left, right, "same_scene", "同场", "", 1, "inferred", [evidence]))
 
 
 def _add_character_organization_edges(
@@ -789,4 +790,284 @@ def _unique(values: Iterable[str]) -> list[str]:
     return result
 
 
-__all__ = ["build_character_graph", "build_event_graph"]
+# ── 绘制层纯逻辑（无 Qt）：关系颜色/标签/方向、节点尺寸、布局坐标。供 PySide 关系图调用并可单测。──
+
+EDGE_RELATION_LABELS = {
+    "ally": "盟友", "rival": "对手", "conflict": "冲突", "relationship": "关系",
+    "trust_shift": "信任变化", "relationship_delta": "关系变化", "childhood_friend": "青梅竹马",
+    "same_scene": "同场", "member_of": "隶属", "leader_of": "领导", "affiliated_with": "从属",
+    "causes": "导致", "caused_by": "源于", "before": "先于", "after": "后于",
+    "involves": "涉及", "mentions_character": "提及", "forbidden_constraint": "禁止",
+    # RG-006 语义独立的规范 kind（同义词经 normalize 归并到这些键），各自有准确中文名
+    "friend": "朋友", "enemy": "敌人", "family": "家人", "lover": "恋人",
+    "mentor": "导师", "student": "门徒", "related": "关联",
+}
+
+# RG-006 英文/变体关系词 → 规范 kind。normalize 先做格式归一，再查这张同义词表。
+_RELATION_ALIASES = {
+    # 盟友/朋友
+    "friends": "friend", "best_friend": "friend", "bestfriend": "friend", "bff": "friend",
+    "buddy": "friend", "companion": "friend", "comrade": "friend", "pal": "friend",
+    "allies": "ally", "allied": "ally", "ally_of": "ally", "partner": "ally",
+    "teammate": "ally", "colleague": "ally", "coworker": "ally", "co_worker": "ally",
+    # 对手/敌人/冲突
+    "enemies": "enemy", "foe": "enemy", "nemesis": "enemy", "adversary": "enemy", "antagonist": "enemy",
+    "opponent": "rival", "competitor": "rival",
+    "hostile": "conflict", "feud": "conflict", "hatred": "conflict",
+    # 家人/恋人/情感
+    "relative": "family", "kin": "family", "sibling": "family", "brother": "family",
+    "sister": "family", "parent": "family", "father": "family", "mother": "family",
+    "son": "family", "daughter": "family", "child": "family",
+    "lovers": "lover", "couple": "lover", "spouse": "lover", "wife": "lover",
+    "husband": "lover", "romance": "lover", "crush": "lover",
+    "relation": "related", "connected": "related", "acquaintance": "related", "knows": "related",
+    # 师徒/上下级（有向）
+    "teacher": "mentor", "master": "mentor", "tutor": "mentor",
+    "disciple": "student", "apprentice": "student", "pupil": "student",
+    "boss": "leader_of", "superior": "leader_of", "leader": "leader_of", "leads": "leader_of",
+    "commands": "leader_of",
+    "subordinate": "member_of", "servant": "member_of", "follower": "member_of",
+    "underling": "member_of", "member": "member_of", "belongs_to": "member_of", "memberof": "member_of",
+    "affiliated": "affiliated_with",
+    # 事件
+    "cause": "causes", "leads_to": "causes", "results_in": "causes",
+    "due_to": "caused_by", "precedes": "before", "follows": "after",
+    "mentions": "mentions_character",
+}
+
+DIRECTED_EDGE_KINDS = {
+    "member_of", "leader_of", "affiliated_with", "causes", "caused_by", "before", "after",
+    "trust_shift", "mentor", "student",
+}
+
+EDGE_COLORS = {
+    "ally": "#3f9b54", "rival": "#e56b73", "conflict": "#d23b46", "relationship": "#6fa8ff",
+    "childhood_friend": "#5fb0c9", "trust_shift": "#c98a2b", "relationship_delta": "#caa23a",
+    "same_scene": "#9aa8ba", "member_of": "#7b61d9", "leader_of": "#5a3fd0", "affiliated_with": "#a08ae0",
+    "causes": "#9b7ede", "caused_by": "#b39ae6", "before": "#8a9bb5", "after": "#8a9bb5",
+    "involves": "#76b3ff", "mentions_character": "#9fc6ff", "forbidden_constraint": "#d23b46",
+    # RG-006 规范 kind 配色（与同族关系同色系）
+    "friend": "#3f9b54", "enemy": "#d23b46", "family": "#6fa8ff", "lover": "#e58fb3",
+    "mentor": "#5a3fd0", "student": "#a08ae0", "related": "#9aa8ba",
+}
+_EDGE_COLOR_DEFAULT = "#9aa8ba"
+
+# RG-007 这些关系默认不画文字标签（靠颜色/图例表达），降低密集图重叠
+_UNLABELED_EDGE_KINDS = {"same_scene"}
+
+CHARACTER_NODE_SIZE = (84.0, 84.0)
+DEFAULT_NODE_SIZE = (132.0, 48.0)
+
+
+def normalize_relation_kind(kind: Any) -> str:
+    """把自由文本关系类型归一：拆驼峰、小写、空格/连字符→下划线，再按同义词表归并到规范 kind。"""
+    raw = str(kind or "")
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", raw)  # camelCase → camel_Case
+    key = re.sub(r"[\s\-]+", "_", spaced.strip().lower())
+    key = re.sub(r"_+", "_", key).strip("_")
+    return _RELATION_ALIASES.get(key, key)
+
+
+def edge_relation_label(kind: Any) -> str:
+    key = normalize_relation_kind(kind)
+    return EDGE_RELATION_LABELS.get(key, "关联")  # RG-006 未知一律中文兜底，绝不露英文
+
+
+def edge_is_directed(kind: Any) -> bool:
+    return normalize_relation_kind(kind) in DIRECTED_EDGE_KINDS
+
+
+def edge_color_hex(kind: Any) -> str:
+    return EDGE_COLORS.get(normalize_relation_kind(kind), _EDGE_COLOR_DEFAULT)
+
+
+def edge_label_visible(kind: Any, confidence: Any) -> bool:
+    """RG-007 是否给该边画文字标签：仅显式且非「同场」关系显示，弱推断默认隐藏以减重叠。"""
+    if normalize_relation_kind(kind) in _UNLABELED_EDGE_KINDS:
+        return False
+    return str(confidence) == "explicit"
+
+
+def label_collides_node(
+    label_box: tuple[float, float, float, float],
+    node_boxes: Iterable[tuple[float, float, float, float]],
+    gap: float = 0.0,
+) -> bool:
+    """RG-007 标签包围盒是否与任一节点包围盒重叠（重叠超过 gap 才算撞）。"""
+    lx0, ly0, lx1, ly1 = label_box
+    for nx0, ny0, nx1, ny1 in node_boxes:
+        ox = min(lx1, nx1) - max(lx0, nx0)
+        oy = min(ly1, ny1) - max(ly0, ny0)
+        if ox > gap and oy > gap:
+            return True
+    return False
+
+
+def node_size(kind: Any) -> tuple[float, float]:
+    return CHARACTER_NODE_SIZE if str(kind) == "character" else DEFAULT_NODE_SIZE
+
+
+def node_boundary_point(
+    center: tuple[float, float], kind: Any, toward: tuple[float, float]
+) -> tuple[float, float]:
+    """从节点中心朝 toward 方向，落在节点边界(圆/矩形)上的点，用于连线端点贴边而非穿心。"""
+    cx, cy = center
+    tx, ty = toward
+    dx, dy = tx - cx, ty - cy
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return (cx, cy)
+    ux, uy = dx / length, dy / length
+    if str(kind) == "character":
+        radius = CHARACTER_NODE_SIZE[0] / 2
+        return (cx + ux * radius, cy + uy * radius)
+    half_w, half_h = DEFAULT_NODE_SIZE[0] / 2, DEFAULT_NODE_SIZE[1] / 2
+    scale_x = half_w / abs(ux) if abs(ux) > 1e-6 else float("inf")
+    scale_y = half_h / abs(uy) if abs(uy) > 1e-6 else float("inf")
+    t = min(scale_x, scale_y)
+    return (cx + ux * t, cy + uy * t)
+
+
+def layout_character_positions(nodes: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
+    """人物图：主角/配角左侧分层、组织右列、其它最右列；列间距足够避免重叠。"""
+    characters = sorted(
+        [n for n in nodes if str(n.get("kind")) == "character"],
+        key=lambda n: int(n.get("weight", 1) or 1),
+        reverse=True,
+    )
+    organizations = [n for n in nodes if str(n.get("kind")) == "organization"]
+    others = [n for n in nodes if str(n.get("kind")) not in {"character", "organization"}]
+    positions: dict[str, tuple[float, float]] = {}
+    primary_count = min(2, len(characters)) if len(characters) > 3 else min(1, len(characters))
+    primary = characters[:primary_count]
+    secondary = characters[primary_count:]
+    for index, node in enumerate(primary):
+        positions[str(node.get("id"))] = (-300.0, (index - (len(primary) - 1) / 2) * 170.0)
+    for index, node in enumerate(secondary):
+        column = index % 2
+        row = index // 2
+        x = -40.0 + column * 220.0
+        y = (row - max(0, (len(secondary) - 1) // 2) / 2) * 170.0
+        positions[str(node.get("id"))] = (x, y)
+    for index, node in enumerate(organizations):
+        positions[str(node.get("id"))] = (450.0, (index - (len(organizations) - 1) / 2) * 180.0)
+    for index, node in enumerate(others):
+        positions[str(node.get("id"))] = (680.0, (index - (len(others) - 1) / 2) * 160.0)
+    return positions
+
+
+def layout_event_positions(
+    nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+) -> dict[str, tuple[float, float]]:
+    """事件图：事件沿时间主轴；辅助节点按类型分 lane，锚定到关联事件附近并向纵向展开（避免跨锚点水平重叠）。"""
+    events = [n for n in nodes if str(n.get("kind")) == "timeline_event"]
+    helpers = [n for n in nodes if str(n.get("kind")) != "timeline_event"]
+    event_ids = {str(n.get("id")): i for i, n in enumerate(events)}
+    positions: dict[str, tuple[float, float]] = {}
+    event_gap = 320.0
+    for index, node in enumerate(events):
+        positions[str(node.get("id"))] = (index * event_gap, 0.0)
+    helper_lanes = {
+        "character": -230.0, "organization": -420.0, "location": 230.0,
+        "foreshadowing": 420.0, "rule": 610.0, "forbidden": 800.0,
+    }
+    connected: dict[str, list[int]] = {}
+    for edge in edges:
+        source = str(edge.get("source", ""))
+        target = str(edge.get("target", ""))
+        if source in event_ids and target not in event_ids:
+            connected.setdefault(target, []).append(event_ids[source])
+        if target in event_ids and source not in event_ids:
+            connected.setdefault(source, []).append(event_ids[target])
+    grouped: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    loose: list[dict[str, Any]] = []
+    for node in helpers:
+        node_id = str(node.get("id"))
+        anchors = connected.get(node_id, [])
+        if not anchors:
+            loose.append(node)
+            continue
+        anchor = round(sum(anchors) / len(anchors))
+        grouped.setdefault((str(node.get("kind")), anchor), []).append(node)
+    # 关键修复：每组只用窄 2 列(±75，远小于 event_gap/2=160)，多了向纵深堆行，杜绝跨相邻锚点水平重叠。
+    for (kind, anchor), group in grouped.items():
+        lane_y = helper_lanes.get(kind, 990.0)
+        direction = -1.0 if lane_y < 0 else 1.0
+        for index, node in enumerate(group):
+            column = index % 2
+            row = index // 2
+            offset_x = (column - 0.5) * 150.0
+            positions[str(node.get("id"))] = (anchor * event_gap + offset_x, lane_y + direction * row * 95.0)
+    # 无连边的游离辅助节点：放到主轴下方独立带，避免与事件 lane 交叠。
+    base_y = 1150.0
+    for index, node in enumerate(loose):
+        column = index % 6
+        row = index // 6
+        positions[str(node.get("id"))] = (column * 180.0, base_y + row * 110.0)
+    return positions
+
+
+def legend_entries() -> list[dict[str, Any]]:
+    """RG-005 图例条目：颜色=关系族、形状=节点类型、线型/箭头=方向与置信度。
+
+    每条目含 ``category``(relation/shape/style)、``label``、``color``(hex 或 None)，
+    形状条目额外含 ``shape``，弱推断条目含 ``dashed``。供 UI 渲染色块、供测试断言。
+    """
+    return [
+        {"category": "relation", "label": "盟友", "color": EDGE_COLORS["ally"]},
+        {"category": "relation", "label": "对手/冲突", "color": EDGE_COLORS["rival"]},
+        {"category": "relation", "label": "隶属/从属", "color": EDGE_COLORS["member_of"]},
+        {"category": "relation", "label": "领导", "color": EDGE_COLORS["leader_of"]},
+        {"category": "relation", "label": "关系/情感", "color": EDGE_COLORS["relationship"]},
+        {"category": "relation", "label": "信任变化", "color": EDGE_COLORS["trust_shift"]},
+        {"category": "relation", "label": "因果", "color": EDGE_COLORS["causes"]},
+        {"category": "relation", "label": "同场/出场", "color": EDGE_COLORS["same_scene"]},
+        {"category": "relation", "label": "时间先后", "color": EDGE_COLORS["before"]},
+        {"category": "shape", "label": "角色（圆形）", "shape": "ellipse", "color": None},
+        {"category": "shape", "label": "事件/设定（方形）", "shape": "rect", "color": None},
+        {"category": "style", "label": "箭头＝有向关系（指向被指方）", "color": None},
+        {"category": "style", "label": "虚线＝弱推断关系", "color": None, "dashed": True},
+    ]
+
+
+def neighborhood_subgraph(
+    graph: dict[str, Any], node_id: Any, depth: int = 1
+) -> dict[str, Any]:
+    """RG-005 大图分段：只保留 ``node_id`` 及其 ``depth`` 跳邻域内的节点与它们之间的边。
+
+    其余图字段（warnings 等）原样保留。``node_id`` 不在图中时返回空节点/空边的子图。
+    """
+    nodes = list(graph.get("nodes", []))
+    edges = list(graph.get("edges", []))
+    target = str(node_id)
+    keep = {target}
+    frontier = {target}
+    for _ in range(max(0, int(depth))):
+        nxt: set[str] = set()
+        for edge in edges:
+            source = str(edge.get("source"))
+            sink = str(edge.get("target"))
+            if source in frontier:
+                nxt.add(sink)
+            if sink in frontier:
+                nxt.add(source)
+        frontier = nxt - keep
+        keep |= nxt
+        if not frontier:
+            break
+    result = dict(graph)
+    result["nodes"] = [n for n in nodes if str(n.get("id")) in keep]
+    result["edges"] = [
+        e for e in edges
+        if str(e.get("source")) in keep and str(e.get("target")) in keep
+    ]
+    return result
+
+
+__all__ = [
+    "build_character_graph", "build_event_graph",
+    "edge_relation_label", "edge_is_directed", "edge_color_hex", "node_size", "node_boundary_point",
+    "normalize_relation_kind", "edge_label_visible", "label_collides_node",
+    "layout_character_positions", "layout_event_positions",
+    "legend_entries", "neighborhood_subgraph",
+]

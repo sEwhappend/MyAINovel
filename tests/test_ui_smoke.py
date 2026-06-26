@@ -2629,7 +2629,8 @@ class UISmokeTests(unittest.TestCase):
 
     def test_pyside_relation_graph_page_exists(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
-        self.assertIn("from .relation_graph import build_character_graph, build_event_graph", source)
+        self.assertIn("build_character_graph", source)
+        self.assertIn("build_event_graph", source)
         self.assertIn("QGraphicsView", source)
         self.assertIn("QGraphicsScene", source)
         self.assertIn("class RelationGraphView(QGraphicsView)", source)
@@ -2677,14 +2678,90 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("def _relation_graph_edge_kinds", source)
         self.assertIn("def _relation_graph_node_kinds", source)
         self.assertIn("当前图谱关系较密", source)
-        self.assertIn("def _character_layer_positions", source)
-        self.assertIn("def _event_timeline_positions", source)
-        self.assertIn('helper_lanes = {', source)
-        self.assertIn('"timeline_event"', source)
-        self.assertIn("event_gap = 320.0", source)
-        self.assertIn('"character": -230.0', source)
-        self.assertIn('"location": 230.0', source)
-        self.assertIn("grouped_helpers", source)
+        # 布局已抽到 relation_graph 纯函数（有确定性单测），pyside 仅委托调用。
+        self.assertIn("layout_character_positions", source)
+        self.assertIn("layout_event_positions", source)
+        rg_source = (SRC / "my_ai_novel" / "relation_graph.py").read_text(encoding="utf-8")
+        self.assertIn("def layout_character_positions", rg_source)
+        self.assertIn("def layout_event_positions", rg_source)
+        self.assertIn("helper_lanes = {", rg_source)
+        self.assertIn("event_gap = 320.0", rg_source)
+        self.assertIn('"character": -230.0', rg_source)
+        self.assertIn('"location": 230.0', rg_source)
+
+    def test_pyside_relation_graph_rg005_legend_zoom_and_focus(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        # 图例
+        self.assertIn("def _build_relation_legend", source)
+        self.assertIn("legend_entries()", source)
+        self.assertIn('heading = QLabel("图例")', source)
+        self.assertIn("left.addWidget(self._build_relation_legend())", source)
+        # 缩放保持
+        self.assertIn("self._user_zoomed = False", source)
+        self.assertIn("if not self._user_zoomed:", source)
+        self.assertIn("self._user_zoomed = True", source)  # wheel / 拖拽平移
+        self.assertIn("def mouseReleaseEvent", source)
+        # 大图分段（邻域聚焦）
+        self.assertIn("def focus_selected_relation_neighborhood", source)
+        self.assertIn("neighborhood_subgraph(full", source)
+        self.assertIn('"聚焦选中"', source)
+        # 纯函数所在
+        rg_source = (SRC / "my_ai_novel" / "relation_graph.py").read_text(encoding="utf-8")
+        self.assertIn("def legend_entries", rg_source)
+        self.assertIn("def neighborhood_subgraph", rg_source)
+
+    def test_pyside_relation_legend_builds_one_row_per_entry(self) -> None:
+        from PySide6.QtWidgets import QApplication, QLabel, QWidget
+        from my_ai_novel.pyside_ui import NovelDesktopUI as PySideUI
+        from my_ai_novel.relation_graph import legend_entries
+
+        QApplication.instance() or QApplication([])
+        ui = object.__new__(PySideUI)
+        legend = ui._build_relation_legend()
+        rows = legend.findChildren(QWidget, "LegendRow")
+        self.assertEqual(len(rows), len(legend_entries()))
+        swatches = legend.findChildren(QLabel, "LegendSwatch")
+        self.assertEqual(len(swatches), len(legend_entries()))
+
+    def test_pyside_relation_graph_rg006_007_chinese_labels_and_no_overlap(self) -> None:
+        import re
+
+        from PySide6.QtWidgets import QApplication, QGraphicsTextItem
+        from my_ai_novel.pyside_ui import RelationGraphView
+
+        QApplication.instance() or QApplication([])
+        view = RelationGraphView(lambda *a: None, lambda *a: None)
+        graph = {
+            "nodes": [
+                {"id": "character:1", "kind": "character", "name": "非常非常长的角色名字应当被省略号截断不溢出"},
+                {"id": "character:2", "kind": "character", "name": "诺"},
+                {"id": "character:3", "kind": "character", "name": "白"},
+            ],
+            "edges": [
+                {"source": "character:1", "target": "character:2", "kind": "mentor", "confidence": "explicit"},
+                {"source": "character:2", "target": "character:3", "kind": "enemy", "confidence": "explicit"},
+                {"source": "character:1", "target": "character:3", "kind": "same_scene", "confidence": "inferred"},
+            ],
+        }
+        view.render_graph(graph, "character")
+        edge_labels = [
+            i.toPlainText() for i in view._scene.items()
+            if isinstance(i, QGraphicsTextItem) and i.data(1) == "edge"
+        ]
+        # RG-006 边标签全中文，不再露英文
+        self.assertTrue(edge_labels)
+        for text in edge_labels:
+            self.assertFalse(re.search(r"[A-Za-z]", text), f"边标签含英文: {text}")
+        # RG-007 同场关系默认不画标签
+        self.assertNotIn("同场", edge_labels)
+        # RG-007 节点标签单行（长名省略，高度约一行）
+        node_labels = [
+            i for i in view._scene.items()
+            if isinstance(i, QGraphicsTextItem) and i.data(1) == "node"
+        ]
+        self.assertTrue(any("…" in i.toPlainText() for i in node_labels))
+        for item in node_labels:
+            self.assertLess(item.boundingRect().height(), 40)
 
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1

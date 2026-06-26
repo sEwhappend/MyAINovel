@@ -14,7 +14,21 @@ from .models import WORLD_ITEM_KINDS
 from .pipeline import NovelPipeline
 from . import style_library
 from .project_files import ensure_project_structure
-from .relation_graph import build_character_graph, build_event_graph
+from .relation_graph import (
+    build_character_graph,
+    build_event_graph,
+    edge_color_hex,
+    edge_is_directed,
+    edge_label_visible,
+    edge_relation_label,
+    label_collides_node,
+    layout_character_positions,
+    layout_event_positions,
+    legend_entries,
+    neighborhood_subgraph,
+    node_boundary_point,
+    node_size,
+)
 from .retrieval import retrieve_context
 from .style_ingest import clean_text, parse_file, text_sha1
 from .style_tags import (
@@ -56,8 +70,8 @@ from .world_modules import (
 )
 
 try:
-    from PySide6.QtCore import QEvent, QRect, QObject, QSize, Qt, Signal
-    from PySide6.QtGui import QColor, QBrush, QCursor, QFont, QLinearGradient, QPainter, QPen, QTextCursor
+    from PySide6.QtCore import QEvent, QPointF, QRect, QObject, QSize, Qt, Signal
+    from PySide6.QtGui import QColor, QBrush, QCursor, QFont, QFontMetrics, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -71,6 +85,8 @@ try:
         QGraphicsEllipseItem,
         QGraphicsItem,
         QGraphicsLineItem,
+        QGraphicsPathItem,
+        QGraphicsPolygonItem,
         QGraphicsRectItem,
         QGraphicsScene,
         QGraphicsTextItem,
@@ -442,6 +458,9 @@ if PYSIDE6_AVAILABLE:
             self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
             self.setObjectName("RelationGraphView")
             self.graph: dict[str, Any] = {"nodes": [], "edges": [], "warnings": []}
+            self._user_zoomed = False  # RG-005 用户手动缩放/平移后，刷新不再自动 fitInView
+            self._press_pos = None
+            self._last_node_ids: frozenset[str] | None = None
 
         def render_graph(self, graph: dict[str, Any], mode: str, query: str = "") -> None:
             self.graph = graph
@@ -464,23 +483,77 @@ if PYSIDE6_AVAILABLE:
                 ]
             if not nodes:
                 self._scene.addText("暂无可显示的关系数据")
+                self._last_node_ids = frozenset()
+                self._user_zoomed = False
                 return
 
+            # RG-005 同一张图被再次刷新 → 保持用户缩放；换了图（项目/模式/筛选变化）→ 重新适配
+            node_ids = frozenset(str(n.get("id")) for n in nodes)
+            if node_ids != getattr(self, "_last_node_ids", None):
+                self._user_zoomed = False
+            self._last_node_ids = node_ids
+
             positions = self._layout_positions(nodes, edges, mode)
+            node_kind = {str(n.get("id")): str(n.get("kind", "")) for n in nodes}
+            # RG-007 节点包围盒，供边标签避让
+            node_boxes = []
+            for n in nodes:
+                pos = positions.get(str(n.get("id")))
+                if not pos:
+                    continue
+                nw, nh = node_size(str(n.get("kind", "")))
+                node_boxes.append((pos[0] - nw / 2, pos[1] - nh / 2, pos[0] + nw / 2, pos[1] + nh / 2))
             for edge in edges:
-                source_pos = positions.get(str(edge.get("source")))
-                target_pos = positions.get(str(edge.get("target")))
+                src = str(edge.get("source"))
+                tgt = str(edge.get("target"))
+                source_pos = positions.get(src)
+                target_pos = positions.get(tgt)
                 if not source_pos or not target_pos:
                     continue
-                line = QGraphicsLineItem(source_pos[0], source_pos[1], target_pos[0], target_pos[1])
-                pen = QPen(self._edge_color(str(edge.get("kind", ""))), max(1, int(edge.get("weight", 1))))
+                kind = str(edge.get("kind", ""))
+                color = self._edge_color(kind)
+                # RG-003 端点贴节点边界（不穿心）
+                start = node_boundary_point(source_pos, node_kind.get(src, ""), target_pos)
+                end = node_boundary_point(target_pos, node_kind.get(tgt, ""), source_pos)
+                mid_x, mid_y = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
+                dx, dy = end[0] - start[0], end[1] - start[1]
+                seg = math.hypot(dx, dy) or 1.0
+                ux, uy = dx / seg, dy / seg
+                # RG-003 轻微弯曲；A→B 与 B→A 朝相反方向，平行/反向边分离
+                bow = min(40.0, seg * 0.12) * (1.0 if src <= tgt else -1.0)
+                ctrl_x, ctrl_y = mid_x + (-uy) * bow, mid_y + ux * bow
+                path = QPainterPath(QPointF(start[0], start[1]))
+                path.quadTo(QPointF(ctrl_x, ctrl_y), QPointF(end[0], end[1]))
+                edge_item = QGraphicsPathItem(path)
+                pen = QPen(color, max(1, int(edge.get("weight", 1))))
                 if str(edge.get("confidence")) != "explicit":
                     pen.setStyle(Qt.PenStyle.DashLine)
-                line.setPen(pen)
-                line.setZValue(0)
-                line.setData(0, edge)
-                line.setData(1, "edge")
-                self._scene.addItem(line)
+                edge_item.setPen(pen)
+                edge_item.setZValue(0)
+                edge_item.setData(0, edge)
+                edge_item.setData(1, "edge")
+                self._scene.addItem(edge_item)
+                if edge_is_directed(kind):  # RG-002 箭头：落在目标节点边界、沿曲线末端切线
+                    tangent = math.hypot(end[0] - ctrl_x, end[1] - ctrl_y) or 1.0
+                    self._add_edge_arrow(end, ((end[0] - ctrl_x) / tangent, (end[1] - ctrl_y) / tangent), color)
+                # RG-001/006/007 关系类型文字标签：仅显式且非同场关系显示，且避开节点不重叠
+                if not edge_label_visible(kind, edge.get("confidence")):
+                    continue
+                edge_label = QGraphicsTextItem(edge_relation_label(kind))
+                edge_label.setDefaultTextColor(color.darker(120))
+                font = edge_label.font()
+                font.setPointSize(8)
+                edge_label.setFont(font)
+                edge_rect = edge_label.boundingRect()
+                lx, ly = ctrl_x - edge_rect.width() / 2, ctrl_y - edge_rect.height() / 2
+                label_box = (lx, ly, lx + edge_rect.width(), ly + edge_rect.height())
+                if label_collides_node(label_box, node_boxes, gap=2.0):  # RG-007 压到节点则不画
+                    continue
+                edge_label.setPos(lx, ly)
+                edge_label.setZValue(1)
+                edge_label.setData(0, edge)
+                edge_label.setData(1, "edge")
+                self._scene.addItem(edge_label)
 
             for node in nodes:
                 x, y = positions[str(node.get("id"))]
@@ -498,27 +571,36 @@ if PYSIDE6_AVAILABLE:
                 item.setData(1, "node")
                 self._scene.addItem(item)
 
-                label = QGraphicsTextItem(str(node.get("label") or node.get("name") or "未命名"))
+                full_name = str(node.get("label") or node.get("name") or "未命名")
+                label_width = 84 if str(node.get("kind")) == "character" else width  # RG-004 角色标签贴合圆形
+                label = QGraphicsTextItem()
                 label.setDefaultTextColor(QColor("#243042"))
-                label.setTextWidth(width)
+                # RG-007 单行省略，长名不再换行溢出节点压到邻居/连线；完整名进 tooltip
+                metrics = QFontMetrics(label.font())
+                label.setPlainText(metrics.elidedText(full_name, Qt.TextElideMode.ElideRight, int(label_width)))
+                label.setToolTip(full_name)
                 label_rect = label.boundingRect()
-                label.setPos(x - width / 2, y - label_rect.height() / 2)
+                label.setPos(x - label_rect.width() / 2, y - label_rect.height() / 2)
                 label.setZValue(3)
                 label.setData(0, node)
                 label.setData(1, "node")
                 self._scene.addItem(label)
-            self.fit_graph()
+            if not self._user_zoomed:  # RG-005 已手动缩放则保持当前视图，不跳回
+                self.fit_graph()
 
         def fit_graph(self) -> None:
             rect = self._scene.itemsBoundingRect()
             if rect.isValid() and not rect.isEmpty():
                 self.fitInView(rect.adjusted(-80, -80, 80, 80), Qt.AspectRatioMode.KeepAspectRatio)
+            self._user_zoomed = False  # 「适配窗口」后恢复自动适配，直到下次手动缩放
 
         def wheelEvent(self, event) -> None:  # type: ignore[override]
             factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
             self.scale(factor, factor)
+            self._user_zoomed = True  # RG-005 记录用户已手动缩放
 
         def mousePressEvent(self, event) -> None:  # type: ignore[override]
+            self._press_pos = event.position() if hasattr(event, "position") else None
             item = self._graph_item_at(event)
             if item is not None:
                 payload = item.data(0)
@@ -526,6 +608,15 @@ if PYSIDE6_AVAILABLE:
                 if isinstance(payload, dict):
                     self.on_select(payload, str(payload_type))
             super().mousePressEvent(event)
+
+        def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+            # RG-005 拖拽平移（ScrollHandDrag）视为手动调整视图，刷新时保持
+            if self._press_pos is not None and hasattr(event, "position"):
+                moved = (event.position() - self._press_pos).manhattanLength()
+                if moved > 3:
+                    self._user_zoomed = True
+            self._press_pos = None
+            super().mouseReleaseEvent(event)
 
         def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
             item = self._graph_item_at(event)
@@ -546,84 +637,10 @@ if PYSIDE6_AVAILABLE:
             return item
 
         def _layout_positions(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]], mode: str) -> dict[str, tuple[float, float]]:
+            # 布局逻辑已抽到 relation_graph 纯函数（可单测、无 Qt 依赖）。
             if mode == "event":
-                return self._event_timeline_positions(nodes, edges)
-            return self._character_layer_positions(nodes)
-
-        def _character_layer_positions(self, nodes: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
-            characters = [node for node in nodes if str(node.get("kind")) == "character"]
-            organizations = [node for node in nodes if str(node.get("kind")) == "organization"]
-            others = [node for node in nodes if str(node.get("kind")) not in {"character", "organization"}]
-            characters = sorted(characters, key=lambda node: int(node.get("weight", 1)), reverse=True)
-            positions: dict[str, tuple[float, float]] = {}
-            primary_count = min(2, len(characters)) if len(characters) > 3 else min(1, len(characters))
-            primary = characters[:primary_count]
-            secondary = characters[primary_count:]
-            for index, node in enumerate(primary):
-                positions[str(node.get("id"))] = (-300.0, (index - (len(primary) - 1) / 2) * 170.0)
-            for index, node in enumerate(secondary):
-                column = index % 2
-                row = index // 2
-                x = -40.0 + column * 220.0
-                y = (row - max(0, (len(secondary) - 1) // 2) / 2) * 170.0
-                positions[str(node.get("id"))] = (x, y)
-            for index, node in enumerate(organizations):
-                positions[str(node.get("id"))] = (450.0, (index - (len(organizations) - 1) / 2) * 180.0)
-            for index, node in enumerate(others):
-                positions[str(node.get("id"))] = (680.0, (index - (len(others) - 1) / 2) * 160.0)
-            return positions
-
-        def _event_timeline_positions(self, nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, tuple[float, float]]:
-            events = [node for node in nodes if str(node.get("kind")) == "timeline_event"]
-            helpers = [node for node in nodes if str(node.get("kind")) != "timeline_event"]
-            event_ids = {str(node.get("id")): index for index, node in enumerate(events)}
-            positions: dict[str, tuple[float, float]] = {}
-            event_gap = 320.0
-            for index, node in enumerate(events):
-                positions[str(node.get("id"))] = (index * event_gap, 0.0)
-            helper_lanes = {
-                "character": -230.0,
-                "organization": -420.0,
-                "location": 230.0,
-                "foreshadowing": 420.0,
-                "rule": 610.0,
-                "forbidden": 800.0,
-            }
-            connected_event_positions: dict[str, list[int]] = {}
-            for edge in edges:
-                source = str(edge.get("source", ""))
-                target = str(edge.get("target", ""))
-                if source in event_ids and target not in event_ids:
-                    connected_event_positions.setdefault(target, []).append(event_ids[source])
-                if target in event_ids and source not in event_ids:
-                    connected_event_positions.setdefault(source, []).append(event_ids[target])
-            grouped_helpers: dict[tuple[str, int], list[dict[str, Any]]] = {}
-            loose_helpers: list[dict[str, Any]] = []
-            for index, node in enumerate(helpers):
-                node_id = str(node.get("id"))
-                kind = str(node.get("kind"))
-                connected = connected_event_positions.get(node_id, [])
-                if not connected:
-                    loose_helpers.append(node)
-                    continue
-                anchor = round(sum(connected) / len(connected))
-                grouped_helpers.setdefault((kind, anchor), []).append(node)
-            for (kind, anchor), group in grouped_helpers.items():
-                lane_y = helper_lanes.get(kind, 990.0)
-                for index, node in enumerate(group):
-                    row = index // 5
-                    column = index % 5
-                    offset = (column - (min(len(group), 5) - 1) / 2) * 155.0
-                    y_offset = row * 110.0
-                    direction = -1 if lane_y < 0 else 1
-                    positions[str(node.get("id"))] = (anchor * event_gap + offset, lane_y + direction * y_offset)
-            for index, node in enumerate(loose_helpers):
-                kind = str(node.get("kind"))
-                lane_y = helper_lanes.get(kind, 990.0)
-                row = index // 6
-                column = index % 6
-                positions[str(node.get("id"))] = (column * 180.0, lane_y + row * 120.0)
-            return positions
+                return layout_event_positions(nodes, edges)
+            return layout_character_positions(nodes)
 
         def _node_color(self, kind: str, source: str = "") -> QColor:
             if source == "missing_reference":
@@ -666,13 +683,20 @@ if PYSIDE6_AVAILABLE:
             return QPen(QColor(border_colors.get(kind, "#6fa8ff")), 2)
 
         def _edge_color(self, kind: str) -> QColor:
-            if kind in {"conflict", "forbidden_constraint"}:
-                return QColor("#e56b73")
-            if kind in {"ally", "same_scene", "involves", "mentions_character"}:
-                return QColor("#6fa8ff")
-            if kind in {"causes", "caused_by", "before", "after"}:
-                return QColor("#9b7ede")
-            return QColor("#9aa8ba")
+            return QColor(edge_color_hex(kind))
+
+        def _add_edge_arrow(self, tip, direction, color: QColor) -> None:
+            tip_x, tip_y = tip
+            ux, uy = direction
+            size, wing = 13.0, 7.0
+            base_x, base_y = tip_x - ux * size, tip_y - uy * size
+            left = QPointF(base_x - uy * wing, base_y + ux * wing)
+            right = QPointF(base_x + uy * wing, base_y - ux * wing)
+            arrow = QGraphicsPolygonItem(QPolygonF([QPointF(tip_x, tip_y), left, right]))
+            arrow.setBrush(QBrush(color))
+            arrow.setPen(QPen(color, 1))
+            arrow.setZValue(1)
+            self._scene.addItem(arrow)
 
 
     class ProjectShelfListWidget(QListWidget):
@@ -2537,6 +2561,7 @@ if PYSIDE6_AVAILABLE:
             toolbar.addWidget(self.relation_graph_inferred)
             toolbar.addWidget(self._button("刷新图谱", self.refresh_relation_graph))
             toolbar.addWidget(self._button("适配窗口", self.fit_relation_graph))
+            toolbar.addWidget(self._button("聚焦选中", self.focus_selected_relation_neighborhood))
             layout.addLayout(toolbar)
 
             splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2553,6 +2578,7 @@ if PYSIDE6_AVAILABLE:
                 "事件关系读取事件、伏笔、地点、组织、规则、章节和小节信息。第一版只读，不会写回资料库。"
             )
             left.addWidget(self.relation_graph_hint, 1)
+            left.addWidget(self._build_relation_legend())
             splitter.addWidget(left_panel)
 
             self.relation_graph_view = RelationGraphView(self._on_relation_graph_selected, self._open_world_item_from_graph)
@@ -2578,6 +2604,50 @@ if PYSIDE6_AVAILABLE:
             splitter.setSizes([220, 640, 300])
             layout.addWidget(splitter, 1)
             self.current_relation_graph_item: dict[str, Any] | None = None
+
+        def _build_relation_legend(self) -> QWidget:
+            # RG-005 图例：颜色=关系族、形状=节点类型、线型/箭头=方向与置信度
+            frame = QFrame()
+            frame.setObjectName("RelationLegendPane")
+            box = QVBoxLayout(frame)
+            box.setContentsMargins(0, 4, 0, 0)
+            box.setSpacing(3)
+            heading = QLabel("图例")
+            heading.setObjectName("PanelTitle")
+            box.addWidget(heading)
+            self.relation_graph_legend_rows = []
+            for entry in legend_entries():
+                row = QWidget()
+                row.setObjectName("LegendRow")
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(6)
+                swatch = QLabel()
+                swatch.setObjectName("LegendSwatch")
+                swatch.setFixedSize(16, 16)
+                color = entry.get("color")
+                shape = entry.get("shape")
+                if color:
+                    radius = 8 if shape == "ellipse" else 3
+                    swatch.setStyleSheet(
+                        f"background:{color}; border:1px solid #6b7585; border-radius:{radius}px;"
+                    )
+                elif shape == "ellipse":
+                    swatch.setStyleSheet("background:#d7deea; border:1px solid #6b7585; border-radius:8px;")
+                elif shape == "rect":
+                    swatch.setStyleSheet("background:#d7deea; border:1px solid #6b7585; border-radius:3px;")
+                elif entry.get("dashed"):
+                    swatch.setStyleSheet("border-bottom:2px dashed #6b7585;")
+                else:  # 箭头等
+                    swatch.setText("➤")
+                    swatch.setStyleSheet("color:#6b7585;")
+                row_layout.addWidget(swatch)
+                text = QLabel(str(entry.get("label", "")))
+                text.setWordWrap(True)
+                row_layout.addWidget(text, 1)
+                box.addWidget(row)
+                self.relation_graph_legend_rows.append(row)
+            return frame
 
         def _build_structure_page(self) -> None:
             page = self._add_page("章节")
@@ -3077,6 +3147,8 @@ if PYSIDE6_AVAILABLE:
                 graph = build_character_graph(world_items, chapters, sections_by_chapter, include_inferred)
             graph = self._filter_relation_graph_for_mode(graph, mode)
             graph = self._filter_relation_graph_for_display(graph, mode)
+            self._relation_full_graph = graph  # RG-005 邻域聚焦的全量底图
+            self._relation_render_mode = mode
             self.relation_graph_view.render_graph(graph, mode, self.relation_graph_search.text())
             node_count = len(graph.get("nodes", []))
             edge_count = len(graph.get("edges", []))
@@ -3096,6 +3168,24 @@ if PYSIDE6_AVAILABLE:
         def fit_relation_graph(self) -> None:
             if hasattr(self, "relation_graph_view"):
                 self.relation_graph_view.fit_graph()
+
+        def focus_selected_relation_neighborhood(self) -> None:
+            # RG-005 大图分段：只展开当前选中节点的 1 跳邻域，密集图减负。「刷新图谱」恢复全量。
+            if not hasattr(self, "relation_graph_view"):
+                return
+            node = self.current_relation_graph_item
+            full = getattr(self, "_relation_full_graph", None)
+            if not isinstance(node, dict) or not full:
+                self.relation_graph_detail.setPlainText("请先在图中选择一个节点，再聚焦其邻域。")
+                return
+            sub = neighborhood_subgraph(full, str(node.get("id")), depth=1)
+            mode = getattr(self, "_relation_render_mode", "character")
+            self.relation_graph_view.render_graph(sub, mode, self.relation_graph_search.text())
+            name = str(node.get("label") or node.get("name") or "选中节点")
+            self.relation_graph_detail.setPlainText(
+                f"已聚焦「{name}」的邻域：节点 {len(sub.get('nodes', []))}、关系 {len(sub.get('edges', []))}。\n"
+                "点击「刷新图谱」恢复完整图谱。"
+            )
 
         def _on_relation_graph_selected(self, payload: dict[str, Any], payload_type: str) -> None:
             self.current_relation_graph_item = payload if payload_type == "node" else None

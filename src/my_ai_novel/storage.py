@@ -994,26 +994,36 @@ class NovelStore:
         project_id: int,
         item: dict[str, Any],
     ) -> None:
-        conn.execute(
-            """
-            INSERT INTO world_items (
-                id, project_id, kind, name, summary, details_json, tags, status,
-                embedding_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(item["id"]),
-                project_id,
-                validate_world_kind(item.get("kind", "character")),
-                item.get("name", ""),
-                item.get("summary", ""),
-                _json(item.get("details_json", item.get("details", {}))),
-                item.get("tags", ""),
-                item.get("status", ""),
-                _json(item.get("embedding_json", item.get("embedding"))),
-                item.get("updated_at") or _now_sql(),
-            ),
+        values = (
+            project_id,
+            validate_world_kind(item.get("kind", "character")),
+            item.get("name", ""),
+            item.get("summary", ""),
+            _json(item.get("details_json", item.get("details", {}))),
+            item.get("tags", ""),
+            item.get("status", ""),
+            _json(item.get("embedding_json", item.get("embedding"))),
+            item.get("updated_at") or _now_sql(),
         )
+        columns = (
+            "project_id, kind, name, summary, details_json, tags, status, "
+            "embedding_json, updated_at"
+        )
+        try:
+            conn.execute(
+                f"INSERT INTO world_items (id, {columns}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(item["id"]), *values),
+            )
+        except sqlite3.IntegrityError:
+            # 全局 world_items.id 与另一项目的镜像冲突（多见于复制项目文件夹时
+            # 沿用了同一 id）。两个条目是不同项目的不同实体，需都保留——这里
+            # 让 SQLite 为冲突的副本重新分配自增 id，避免整库重建直接崩溃。
+            conn.execute(
+                f"INSERT INTO world_items ({columns}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
 
     def _insert_file_chapter(
         self,

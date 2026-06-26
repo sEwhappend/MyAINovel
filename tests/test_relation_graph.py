@@ -1,6 +1,174 @@
 import unittest
+from itertools import combinations
 
-from my_ai_novel.relation_graph import build_character_graph, build_event_graph
+from my_ai_novel.relation_graph import (
+    build_character_graph,
+    build_event_graph,
+    edge_color_hex,
+    edge_is_directed,
+    edge_label_visible,
+    edge_relation_label,
+    label_collides_node,
+    layout_character_positions,
+    layout_event_positions,
+    legend_entries,
+    neighborhood_subgraph,
+    node_boundary_point,
+    node_size,
+    normalize_relation_kind,
+)
+
+
+def _node(node_id, kind, weight=1):
+    return {"id": node_id, "kind": kind, "weight": weight, "name": str(node_id)}
+
+
+def _no_node_overlap(test, positions, nodes, gap=1.0):
+    boxes = {}
+    for n in nodes:
+        x, y = positions[str(n["id"])]
+        w, h = node_size(str(n["kind"]))
+        boxes[str(n["id"])] = (x - w / 2, y - h / 2, x + w / 2, y + h / 2)
+    for a, b in combinations([str(n["id"]) for n in nodes], 2):
+        ax0, ay0, ax1, ay1 = boxes[a]
+        bx0, by0, bx1, by1 = boxes[b]
+        ox = min(ax1, bx1) - max(ax0, bx0)
+        oy = min(ay1, by1) - max(ay0, by0)
+        test.assertFalse(ox > gap and oy > gap, f"node {a} overlaps {b} (ox={ox:.0f}, oy={oy:.0f})")
+
+
+class RelationGraphDrawHelpersTests(unittest.TestCase):
+    def test_edge_relation_label_known_and_fallback(self) -> None:
+        self.assertEqual(edge_relation_label("member_of"), "隶属")
+        self.assertEqual(edge_relation_label("ally"), "盟友")
+        self.assertEqual(edge_relation_label("causes"), "导致")
+        self.assertTrue(edge_relation_label("totally_unknown"))  # 不为空
+
+    def test_edge_is_directed(self) -> None:
+        for k in ("member_of", "leader_of", "affiliated_with", "causes", "caused_by", "before", "after", "trust_shift"):
+            self.assertTrue(edge_is_directed(k), k)
+        for k in ("ally", "rival", "same_scene", "relationship", "conflict"):
+            self.assertFalse(edge_is_directed(k), k)
+
+    def test_edge_color_distinguishes_key_kinds(self) -> None:
+        ally = edge_color_hex("ally")
+        self.assertNotEqual(ally, edge_color_hex("rival"))
+        self.assertNotEqual(ally, edge_color_hex("member_of"))
+        self.assertNotEqual(ally, edge_color_hex("causes"))
+        self.assertNotEqual(edge_color_hex("member_of"), edge_color_hex("causes"))
+        self.assertNotEqual(edge_color_hex("rival"), edge_color_hex("__unknown__"))  # rival 不落默认灰
+
+    def test_node_boundary_point(self) -> None:
+        # 圆形角色：朝右 → 圆周半径 42
+        x, y = node_boundary_point((0.0, 0.0), "character", (100.0, 0.0))
+        self.assertAlmostEqual(x, 42.0, delta=0.5)
+        self.assertAlmostEqual(y, 0.0, delta=0.5)
+        # 矩形：朝右 → 半宽 66；朝上 → 半高 24
+        self.assertAlmostEqual(node_boundary_point((0.0, 0.0), "location", (100.0, 0.0))[0], 66.0, delta=0.5)
+        self.assertAlmostEqual(node_boundary_point((0.0, 0.0), "location", (0.0, 100.0))[1], 24.0, delta=0.5)
+        # 退化：同点返回中心
+        self.assertEqual(node_boundary_point((5.0, 5.0), "character", (5.0, 5.0)), (5.0, 5.0))
+
+    def test_character_layout_no_overlap(self) -> None:
+        nodes = [_node(f"character:{i}", "character", weight=10 - i) for i in range(8)]
+        nodes += [_node(f"organization:{i}", "organization") for i in range(4)]
+        nodes += [_node(f"location:{i}", "location") for i in range(3)]
+        _no_node_overlap(self, layout_character_positions(nodes), nodes)
+
+    def test_event_layout_no_overlap_across_anchors(self) -> None:
+        events = [_node(f"timeline_event:{i}", "timeline_event") for i in range(5)]
+        helpers = [_node(f"character:{i}", "character") for i in range(10)]
+        nodes = events + helpers
+        # 每个 helper 连到相邻事件，触发跨锚点同 lane 重叠场景
+        edges = [{"source": f"timeline_event:{i % 5}", "target": f"character:{i}", "kind": "involves"} for i in range(10)]
+        _no_node_overlap(self, layout_event_positions(nodes, edges), nodes)
+
+    def test_normalize_relation_kind(self) -> None:
+        # 大小写/空格/连字符/驼峰统一
+        self.assertEqual(normalize_relation_kind("Best Friend"), normalize_relation_kind("best-friend"))
+        self.assertEqual(normalize_relation_kind("memberOf"), "member_of")
+        self.assertEqual(normalize_relation_kind("  ALLY  "), "ally")
+        # 同义词归并到规范 kind
+        self.assertEqual(normalize_relation_kind("foe"), normalize_relation_kind("enemy"))
+        self.assertEqual(normalize_relation_kind("teacher"), normalize_relation_kind("mentor"))
+
+    def test_edge_relation_label_translates_english_and_never_leaks_english(self) -> None:
+        # 常见英文关系词 → 中文
+        for raw in ["friend", "enemy", "family", "lover", "mentor", "rival", "ally", "related"]:
+            label = edge_relation_label(raw)
+            self.assertFalse(any("a" <= ch.lower() <= "z" for ch in label), f"{raw}->{label} 含英文")
+        # 完全未知 kind → 中文兜底「关联」，不再露原英文
+        self.assertEqual(edge_relation_label("__totally_unknown_xyz__"), "关联")
+        self.assertEqual(edge_relation_label("frobnicate"), "关联")
+
+    def test_edge_color_and_direction_follow_normalized_kind(self) -> None:
+        # 同义词复用合理配色，且不落默认灰
+        self.assertEqual(edge_color_hex("friend"), edge_color_hex("Friend"))
+        self.assertNotEqual(edge_color_hex("enemy"), edge_color_hex("__unknown__"))
+        # 师徒有向
+        self.assertTrue(edge_is_directed("mentor"))
+        self.assertTrue(edge_is_directed("memberOf"))
+        self.assertFalse(edge_is_directed("friend"))
+
+    def test_edge_label_visible(self) -> None:
+        # 显式且非同场 → 显示
+        self.assertTrue(edge_label_visible("ally", "explicit"))
+        # 同场 → 永不显示（靠颜色/图例）
+        self.assertFalse(edge_label_visible("same_scene", "explicit"))
+        # 弱推断 → 默认不显示，降低重叠
+        self.assertFalse(edge_label_visible("relationship", "inferred"))
+        self.assertFalse(edge_label_visible("relationship", "text_match"))
+
+    def test_label_collides_node(self) -> None:
+        node_boxes = [(0.0, 0.0, 100.0, 50.0)]
+        # 标签盒落在节点内 → 撞
+        self.assertTrue(label_collides_node((10.0, 10.0, 40.0, 30.0), node_boxes))
+        # 标签盒在远处 → 不撞
+        self.assertFalse(label_collides_node((200.0, 200.0, 240.0, 220.0), node_boxes))
+        # 仅贴边（间隙阈值内不算撞）
+        self.assertFalse(label_collides_node((100.0, 0.0, 130.0, 20.0), node_boxes, gap=1.0))
+
+    def test_legend_entries(self) -> None:
+        entries = legend_entries()
+        self.assertTrue(entries)
+        # 关系条目都带合法十六进制颜色
+        relations = [e for e in entries if e["category"] == "relation"]
+        self.assertGreaterEqual(len(relations), 6)
+        for e in relations:
+            self.assertTrue(str(e["color"]).startswith("#") and len(e["color"]) == 7)
+            self.assertTrue(e["label"])
+        # 盟友与对手颜色可辨（同 RG-001 配色）
+        ally = next(e for e in relations if e["label"] == "盟友")
+        rival = next(e for e in relations if "对手" in e["label"])
+        self.assertEqual(ally["color"], edge_color_hex("ally"))
+        self.assertNotEqual(ally["color"], rival["color"])
+        # 含形状与线型说明
+        cats = {e["category"] for e in entries}
+        self.assertIn("shape", cats)
+        self.assertIn("style", cats)
+
+    def test_neighborhood_subgraph(self) -> None:
+        graph = {
+            "nodes": [_node(f"character:{i}", "character") for i in range(4)],
+            "edges": [
+                {"source": "character:0", "target": "character:1", "kind": "ally"},
+                {"source": "character:1", "target": "character:2", "kind": "rival"},
+                {"source": "character:2", "target": "character:3", "kind": "ally"},
+            ],
+            "warnings": ["保留"],
+        }
+        # depth=1：0 的邻域 = {0,1}，只保留两者之间的边
+        sub = neighborhood_subgraph(graph, "character:0", depth=1)
+        self.assertEqual({str(n["id"]) for n in sub["nodes"]}, {"character:0", "character:1"})
+        self.assertEqual(len(sub["edges"]), 1)
+        self.assertEqual(sub["warnings"], ["保留"])  # 其余字段原样保留
+        # depth=2：扩到 {0,1,2}
+        sub2 = neighborhood_subgraph(graph, "character:0", depth=2)
+        self.assertEqual({str(n["id"]) for n in sub2["nodes"]}, {"character:0", "character:1", "character:2"})
+        # 不存在的节点 → 空子图
+        empty = neighborhood_subgraph(graph, "character:99", depth=1)
+        self.assertEqual(empty["nodes"], [])
+        self.assertEqual(empty["edges"], [])
 
 
 def edge_exists(graph, source, target, kind):

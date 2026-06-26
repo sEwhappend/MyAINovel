@@ -17,6 +17,7 @@ from .project_files import ensure_project_structure
 from .relation_graph import (
     build_character_graph,
     build_event_graph,
+    assign_edge_lanes,
     edge_color_hex,
     edge_is_directed,
     edge_label_visible,
@@ -503,7 +504,8 @@ if PYSIDE6_AVAILABLE:
                     continue
                 nw, nh = node_size(str(n.get("kind", "")))
                 node_boxes.append((pos[0] - nw / 2, pos[1] - nh / 2, pos[0] + nw / 2, pos[1] + nh / 2))
-            for edge in edges:
+            edge_lanes = assign_edge_lanes(edges)  # RG-008 同对多边分车道，避免连线重合
+            for edge, lane in zip(edges, edge_lanes):
                 src = str(edge.get("source"))
                 tgt = str(edge.get("target"))
                 source_pos = positions.get(src)
@@ -519,8 +521,10 @@ if PYSIDE6_AVAILABLE:
                 dx, dy = end[0] - start[0], end[1] - start[1]
                 seg = math.hypot(dx, dy) or 1.0
                 ux, uy = dx / seg, dy / seg
-                # RG-003 轻微弯曲；A→B 与 B→A 朝相反方向，平行/反向边分离
-                bow = min(40.0, seg * 0.12) * (1.0 if src <= tgt else -1.0)
+                # RG-003/008 曲线弯曲量按车道扇形展开：同一对节点的多条边各占一条车道，
+                # lane=0 走直线，其余对称分布两侧，互不重合。步长随边长收敛，短边不过弯。
+                step = max(20.0, min(34.0, seg * 0.14))
+                bow = lane * step
                 ctrl_x, ctrl_y = mid_x + (-uy) * bow, mid_y + ux * bow
                 path = QPainterPath(QPointF(start[0], start[1]))
                 path.quadTo(QPointF(ctrl_x, ctrl_y), QPointF(end[0], end[1]))

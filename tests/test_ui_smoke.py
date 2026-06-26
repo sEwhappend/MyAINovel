@@ -2763,6 +2763,33 @@ class UISmokeTests(unittest.TestCase):
         for item in node_labels:
             self.assertLess(item.boundingRect().height(), 40)
 
+    def test_pyside_relation_graph_rg008_parallel_edges_do_not_coincide(self) -> None:
+        from PySide6.QtWidgets import QApplication, QGraphicsPathItem
+        from my_ai_novel.pyside_ui import RelationGraphView
+
+        QApplication.instance() or QApplication([])
+        view = RelationGraphView(lambda *a: None, lambda *a: None)
+        graph = {
+            "nodes": [
+                {"id": "character:1", "kind": "character", "name": "甲"},
+                {"id": "character:2", "kind": "character", "name": "乙"},
+            ],
+            "edges": [
+                {"source": "character:1", "target": "character:2", "kind": "ally", "confidence": "explicit", "id": "e1"},
+                {"source": "character:1", "target": "character:2", "kind": "mentor", "confidence": "explicit", "id": "e2"},
+                {"source": "character:2", "target": "character:1", "kind": "enemy", "confidence": "explicit", "id": "e3"},
+            ],
+        }
+        view.render_graph(graph, "character")
+        paths = [i for i in view._scene.items() if isinstance(i, QGraphicsPathItem)]
+        self.assertEqual(len(paths), 3)
+        # 三条同对边的曲线包围盒各不相同 → 不再完全重合
+        centers = {
+            (round(p.path().boundingRect().center().x(), 1), round(p.path().boundingRect().center().y(), 1))
+            for p in paths
+        }
+        self.assertEqual(len(centers), 3)
+
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1
         while time.time() < deadline:

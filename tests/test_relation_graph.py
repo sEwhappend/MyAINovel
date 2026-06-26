@@ -6,6 +6,7 @@ from my_ai_novel.relation_graph import (
     build_event_graph,
     edge_color_hex,
     edge_is_directed,
+    assign_edge_lanes,
     edge_label_visible,
     edge_relation_label,
     label_collides_node,
@@ -118,6 +119,20 @@ class RelationGraphDrawHelpersTests(unittest.TestCase):
         # 弱推断 → 默认不显示，降低重叠
         self.assertFalse(edge_label_visible("relationship", "inferred"))
         self.assertFalse(edge_label_visible("relationship", "text_match"))
+
+    def test_assign_edge_lanes_separates_parallel_edges(self) -> None:
+        edges = [
+            {"source": "a", "target": "b", "kind": "ally", "id": "e1"},
+            {"source": "a", "target": "b", "kind": "mentor", "id": "e2"},  # 同对、不同关系
+            {"source": "b", "target": "a", "kind": "enemy", "id": "e3"},   # 反向，仍是同一对节点
+            {"source": "c", "target": "d", "kind": "ally", "id": "e4"},    # 独边
+        ]
+        lanes = assign_edge_lanes(edges)
+        self.assertEqual(len(lanes), len(edges))  # 与输入对齐
+        ab = [lanes[0], lanes[1], lanes[2]]
+        self.assertEqual(len(set(ab)), 3)          # 同一对的三条边 lane 互不相同 → 不重合
+        self.assertAlmostEqual(sum(ab), 0.0)       # 对称分布在主轴两侧
+        self.assertEqual(lanes[3], 0.0)            # 独边走中线（直线）
 
     def test_label_collides_node(self) -> None:
         node_boxes = [(0.0, 0.0, 100.0, 50.0)]

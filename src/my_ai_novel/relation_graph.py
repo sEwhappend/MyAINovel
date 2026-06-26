@@ -888,6 +888,28 @@ def edge_label_visible(kind: Any, confidence: Any) -> bool:
     return str(confidence) == "explicit"
 
 
+def assign_edge_lanes(edges: list[dict[str, Any]]) -> list[float]:
+    """RG-008 同一对节点间的多条边分配不同「车道」，扇形展开避免曲线完全重合。
+
+    返回与 ``edges`` 顺序对齐的 lane 列表：同一对节点（无向）内对称分布在主轴两侧，
+    独边走中线 lane=0（直线）。lane 之后在绘制层乘以步长换算成弯曲量。
+    """
+    groups: dict[frozenset[str], list[int]] = {}
+    for index, edge in enumerate(edges):
+        pair = frozenset((str(edge.get("source")), str(edge.get("target"))))
+        groups.setdefault(pair, []).append(index)
+    lanes = [0.0] * len(edges)
+    for indices in groups.values():
+        ordered = sorted(
+            indices,
+            key=lambda i: (str(edges[i].get("kind")), str(edges[i].get("id")), i),
+        )
+        count = len(ordered)
+        for rank, i in enumerate(ordered):
+            lanes[i] = rank - (count - 1) / 2.0
+    return lanes
+
+
 def label_collides_node(
     label_box: tuple[float, float, float, float],
     node_boxes: Iterable[tuple[float, float, float, float]],
@@ -1067,7 +1089,7 @@ def neighborhood_subgraph(
 __all__ = [
     "build_character_graph", "build_event_graph",
     "edge_relation_label", "edge_is_directed", "edge_color_hex", "node_size", "node_boundary_point",
-    "normalize_relation_kind", "edge_label_visible", "label_collides_node",
+    "normalize_relation_kind", "edge_label_visible", "label_collides_node", "assign_edge_lanes",
     "layout_character_positions", "layout_event_positions",
     "legend_entries", "neighborhood_subgraph",
 ]

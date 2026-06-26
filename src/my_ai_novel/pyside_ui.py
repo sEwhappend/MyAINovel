@@ -447,6 +447,27 @@ if PYSIDE6_AVAILABLE:
         status = Signal(str)
 
 
+    class _DraggableNodeMixin:
+        """RG-009 可拖动节点：位置变化时回调视图重连其相关边并带动标签。"""
+
+        def init_drag(self, view: "RelationGraphView", node_id: str) -> None:
+            self._drag_view = view
+            self._drag_node_id = node_id
+
+        def itemChange(self, change, value):  # type: ignore[override]
+            if (
+                change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged
+                and getattr(self, "_drag_view", None) is not None
+            ):
+                self._drag_view._on_node_moved(self._drag_node_id)
+            return super().itemChange(change, value)
+
+    class _DraggableEllipseNode(_DraggableNodeMixin, QGraphicsEllipseItem):
+        pass
+
+    class _DraggableRectNode(_DraggableNodeMixin, QGraphicsRectItem):
+        pass
+
     class RelationGraphView(QGraphicsView):
         def __init__(self, on_select: Callable[[dict[str, Any], str], None], on_open: Callable[[dict[str, Any]], None]) -> None:
             super().__init__()
@@ -462,6 +483,12 @@ if PYSIDE6_AVAILABLE:
             self._user_zoomed = False  # RG-005 用户手动缩放/平移后，刷新不再自动 fitInView
             self._press_pos = None
             self._last_node_ids: frozenset[str] | None = None
+            # RG-009 拖动支持：节点/标签/边的登记表，移动节点时实时重连
+            self._node_items: dict[str, Any] = {}
+            self._node_labels: dict[str, Any] = {}
+            self._node_kind: dict[str, str] = {}
+            self._edge_records: list[dict[str, Any]] = []
+            self._dragging_node = False
 
         def render_graph(self, graph: dict[str, Any], mode: str, query: str = "") -> None:
             self.graph = graph
@@ -486,6 +513,9 @@ if PYSIDE6_AVAILABLE:
                 self._scene.addText("暂无可显示的关系数据")
                 self._last_node_ids = frozenset()
                 self._user_zoomed = False
+                self._node_items = {}
+                self._node_labels = {}
+                self._edge_records = []
                 return
 
             # RG-005 同一张图被再次刷新 → 保持用户缩放；换了图（项目/模式/筛选变化）→ 重新适配
@@ -495,102 +525,173 @@ if PYSIDE6_AVAILABLE:
             self._last_node_ids = node_ids
 
             positions = self._layout_positions(nodes, edges, mode)
-            node_kind = {str(n.get("id")): str(n.get("kind", "")) for n in nodes}
-            # RG-007 节点包围盒，供边标签避让
-            node_boxes = []
-            for n in nodes:
-                pos = positions.get(str(n.get("id")))
-                if not pos:
-                    continue
-                nw, nh = node_size(str(n.get("kind", "")))
-                node_boxes.append((pos[0] - nw / 2, pos[1] - nh / 2, pos[0] + nw / 2, pos[1] + nh / 2))
+            self._node_kind = {str(n.get("id")): str(n.get("kind", "")) for n in nodes}
+            self._node_items = {}
+            self._node_labels = {}
+            self._edge_records = []
+
+            # 先建节点（拖动/重连都读节点当前中心）
+            for node in nodes:
+                pos = positions.get(str(node.get("id")))
+                if pos:
+                    self._create_node_item(node, pos)
+
+            # 再建边并登记，几何统一由 _apply_edge_geometry 计算，便于拖动时实时复算
             edge_lanes = assign_edge_lanes(edges)  # RG-008 同对多边分车道，避免连线重合
+            node_boxes = self._current_node_boxes()
             for edge, lane in zip(edges, edge_lanes):
                 src = str(edge.get("source"))
                 tgt = str(edge.get("target"))
-                source_pos = positions.get(src)
-                target_pos = positions.get(tgt)
-                if not source_pos or not target_pos:
-                    continue
-                kind = str(edge.get("kind", ""))
-                color = self._edge_color(kind)
-                # RG-003 端点贴节点边界（不穿心）
-                start = node_boundary_point(source_pos, node_kind.get(src, ""), target_pos)
-                end = node_boundary_point(target_pos, node_kind.get(tgt, ""), source_pos)
-                mid_x, mid_y = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
-                dx, dy = end[0] - start[0], end[1] - start[1]
-                seg = math.hypot(dx, dy) or 1.0
-                ux, uy = dx / seg, dy / seg
-                # RG-003/008 曲线弯曲量按车道扇形展开：同一对节点的多条边各占一条车道，
-                # lane=0 走直线，其余对称分布两侧，互不重合。步长随边长收敛，短边不过弯。
-                step = max(20.0, min(34.0, seg * 0.14))
-                bow = lane * step
-                ctrl_x, ctrl_y = mid_x + (-uy) * bow, mid_y + ux * bow
-                path = QPainterPath(QPointF(start[0], start[1]))
-                path.quadTo(QPointF(ctrl_x, ctrl_y), QPointF(end[0], end[1]))
-                edge_item = QGraphicsPathItem(path)
-                pen = QPen(color, max(1, int(edge.get("weight", 1))))
-                if str(edge.get("confidence")) != "explicit":
-                    pen.setStyle(Qt.PenStyle.DashLine)
-                edge_item.setPen(pen)
-                edge_item.setZValue(0)
-                edge_item.setData(0, edge)
-                edge_item.setData(1, "edge")
-                self._scene.addItem(edge_item)
-                if edge_is_directed(kind):  # RG-002 箭头：落在目标节点边界、沿曲线末端切线
-                    tangent = math.hypot(end[0] - ctrl_x, end[1] - ctrl_y) or 1.0
-                    self._add_edge_arrow(end, ((end[0] - ctrl_x) / tangent, (end[1] - ctrl_y) / tangent), color)
-                # RG-001/006/007 关系类型文字标签：仅显式且非同场关系显示，且避开节点不重叠
-                if not edge_label_visible(kind, edge.get("confidence")):
-                    continue
-                edge_label = QGraphicsTextItem(edge_relation_label(kind))
-                edge_label.setDefaultTextColor(color.darker(120))
-                font = edge_label.font()
-                font.setPointSize(8)
-                edge_label.setFont(font)
-                edge_rect = edge_label.boundingRect()
-                lx, ly = ctrl_x - edge_rect.width() / 2, ctrl_y - edge_rect.height() / 2
-                label_box = (lx, ly, lx + edge_rect.width(), ly + edge_rect.height())
-                if label_collides_node(label_box, node_boxes, gap=2.0):  # RG-007 压到节点则不画
-                    continue
-                edge_label.setPos(lx, ly)
-                edge_label.setZValue(1)
-                edge_label.setData(0, edge)
-                edge_label.setData(1, "edge")
-                self._scene.addItem(edge_label)
+                if src in self._node_items and tgt in self._node_items:
+                    self._create_edge_record(edge, src, tgt, lane, node_boxes)
 
-            for node in nodes:
-                x, y = positions[str(node.get("id"))]
-                width = 132
-                height = 48
-                if str(node.get("kind")) == "character":
-                    item = QGraphicsEllipseItem(x - 42, y - 42, 84, 84)
-                else:
-                    item = QGraphicsRectItem(x - width / 2, y - height / 2, width, height)
-                item.setBrush(QBrush(self._node_color(str(node.get("kind", "")), str(node.get("source", "")))))
-                item.setPen(self._node_pen(str(node.get("kind", "")), str(node.get("source", ""))))
-                item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-                item.setZValue(2)
-                item.setData(0, node)
-                item.setData(1, "node")
-                self._scene.addItem(item)
-
-                full_name = str(node.get("label") or node.get("name") or "未命名")
-                label_width = 84 if str(node.get("kind")) == "character" else width  # RG-004 角色标签贴合圆形
-                label = QGraphicsTextItem()
-                label.setDefaultTextColor(QColor("#243042"))
-                # RG-007 单行省略，长名不再换行溢出节点压到邻居/连线；完整名进 tooltip
-                metrics = QFontMetrics(label.font())
-                label.setPlainText(metrics.elidedText(full_name, Qt.TextElideMode.ElideRight, int(label_width)))
-                label.setToolTip(full_name)
-                label_rect = label.boundingRect()
-                label.setPos(x - label_rect.width() / 2, y - label_rect.height() / 2)
-                label.setZValue(3)
-                label.setData(0, node)
-                label.setData(1, "node")
-                self._scene.addItem(label)
             if not self._user_zoomed:  # RG-005 已手动缩放则保持当前视图，不跳回
                 self.fit_graph()
+
+        # ---- RG-009 节点/边的创建与（拖动时的）几何复算 ----
+        def _create_node_item(self, node: dict[str, Any], pos: tuple[float, float]) -> None:
+            kind = str(node.get("kind", ""))
+            node_id = str(node.get("id"))
+            source = str(node.get("source", ""))
+            if kind == "character":
+                item = _DraggableEllipseNode(-42, -42, 84, 84)
+            else:
+                item = _DraggableRectNode(-66, -24, 132, 48)
+            item.setBrush(QBrush(self._node_color(kind, source)))
+            item.setPen(self._node_pen(kind, source))
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+            item.setCursor(Qt.CursorShape.OpenHandCursor)
+            item.setZValue(2)
+            item.setData(0, node)
+            item.setData(1, "node")
+            item.setPos(pos[0], pos[1])  # 此时尚未 init_drag，itemChange 不会回调
+            item.init_drag(self, node_id)
+            self._scene.addItem(item)
+            self._node_items[node_id] = item
+
+            full_name = str(node.get("label") or node.get("name") or "未命名")
+            label_width = 84 if kind == "character" else 132  # RG-004 角色标签贴合圆形
+            label = QGraphicsTextItem()
+            label.setDefaultTextColor(QColor("#243042"))
+            # RG-007 单行省略，长名不再换行溢出节点压到邻居/连线；完整名进 tooltip
+            metrics = QFontMetrics(label.font())
+            label.setPlainText(metrics.elidedText(full_name, Qt.TextElideMode.ElideRight, int(label_width)))
+            label.setToolTip(full_name)
+            label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)  # 点击穿透到节点，便于在标签上也能拖动
+            label.setZValue(3)
+            label.setData(0, node)
+            label.setData(1, "node")
+            self._scene.addItem(label)
+            self._node_labels[node_id] = label
+            self._position_node_label(node_id)
+
+        def _position_node_label(self, node_id: str) -> None:
+            item = self._node_items.get(node_id)
+            label = self._node_labels.get(node_id)
+            if item is None or label is None:
+                return
+            center = item.pos()
+            rect = label.boundingRect()
+            label.setPos(center.x() - rect.width() / 2, center.y() - rect.height() / 2)
+
+        def _current_node_boxes(self) -> list[tuple[float, float, float, float]]:
+            boxes = []
+            for node_id, item in self._node_items.items():
+                center = item.pos()
+                w, h = node_size(self._node_kind.get(node_id, ""))
+                boxes.append((center.x() - w / 2, center.y() - h / 2, center.x() + w / 2, center.y() + h / 2))
+            return boxes
+
+        def _create_edge_record(
+            self, edge: dict[str, Any], src: str, tgt: str, lane: float, node_boxes: list
+        ) -> None:
+            kind = str(edge.get("kind", ""))
+            color = self._edge_color(kind)
+            path_item = QGraphicsPathItem()
+            pen = QPen(color, max(1, int(edge.get("weight", 1))))
+            if str(edge.get("confidence")) != "explicit":
+                pen.setStyle(Qt.PenStyle.DashLine)
+            path_item.setPen(pen)
+            path_item.setZValue(0)
+            path_item.setData(0, edge)
+            path_item.setData(1, "edge")
+            self._scene.addItem(path_item)
+
+            arrow_item = None
+            if edge_is_directed(kind):  # RG-002 有向边箭头
+                arrow_item = QGraphicsPolygonItem()
+                arrow_item.setBrush(QBrush(color))
+                arrow_item.setPen(QPen(color, 1))
+                arrow_item.setZValue(1)
+                arrow_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                self._scene.addItem(arrow_item)
+
+            label_item = None
+            if edge_label_visible(kind, edge.get("confidence")):  # RG-006/007 中文标签，弱关系不画
+                label_item = QGraphicsTextItem(edge_relation_label(kind))
+                label_item.setDefaultTextColor(color.darker(120))
+                font = label_item.font()
+                font.setPointSize(8)
+                label_item.setFont(font)
+                label_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                label_item.setZValue(1)
+                label_item.setData(0, edge)
+                label_item.setData(1, "edge")
+                self._scene.addItem(label_item)
+
+            record = {
+                "edge": edge, "src": src, "tgt": tgt, "lane": float(lane),
+                "path": path_item, "arrow": arrow_item, "label": label_item,
+            }
+            self._edge_records.append(record)
+            self._apply_edge_geometry(record, node_boxes)
+
+        def _apply_edge_geometry(self, record: dict[str, Any], node_boxes: list) -> None:
+            src, tgt = record["src"], record["tgt"]
+            s_item = self._node_items.get(src)
+            t_item = self._node_items.get(tgt)
+            if s_item is None or t_item is None:
+                return
+            sc, tc = s_item.pos(), t_item.pos()
+            source_pos, target_pos = (sc.x(), sc.y()), (tc.x(), tc.y())
+            start = node_boundary_point(source_pos, self._node_kind.get(src, ""), target_pos)
+            end = node_boundary_point(target_pos, self._node_kind.get(tgt, ""), source_pos)
+            mid_x, mid_y = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
+            dx, dy = end[0] - start[0], end[1] - start[1]
+            seg = math.hypot(dx, dy) or 1.0
+            ux, uy = dx / seg, dy / seg
+            # RG-003/008 曲线弯曲量按车道扇形展开，步长随边长收敛
+            step = max(20.0, min(34.0, seg * 0.14))
+            bow = record["lane"] * step
+            ctrl_x, ctrl_y = mid_x + (-uy) * bow, mid_y + ux * bow
+            path = QPainterPath(QPointF(start[0], start[1]))
+            path.quadTo(QPointF(ctrl_x, ctrl_y), QPointF(end[0], end[1]))
+            record["path"].setPath(path)
+            if record["arrow"] is not None:
+                tangent = math.hypot(end[0] - ctrl_x, end[1] - ctrl_y) or 1.0
+                record["arrow"].setPolygon(self._arrow_polygon(end, ((end[0] - ctrl_x) / tangent, (end[1] - ctrl_y) / tangent)))
+            label = record["label"]
+            if label is not None:
+                rect = label.boundingRect()
+                lx, ly = ctrl_x - rect.width() / 2, ctrl_y - rect.height() / 2
+                box = (lx, ly, lx + rect.width(), ly + rect.height())
+                if label_collides_node(box, node_boxes, gap=2.0):  # RG-007 压到节点则隐藏
+                    label.setVisible(False)
+                else:
+                    label.setVisible(True)
+                    label.setPos(lx, ly)
+
+        def _on_node_moved(self, node_id: str) -> None:
+            # RG-009 拖动节点：带动其标签，并实时重连其相关边（线/箭头/标签跟随）
+            if node_id not in self._node_items:
+                return
+            self._position_node_label(node_id)
+            node_boxes = self._current_node_boxes()
+            for record in self._edge_records:
+                if record["src"] == node_id or record["tgt"] == node_id:
+                    self._apply_edge_geometry(record, node_boxes)
 
         def fit_graph(self) -> None:
             rect = self._scene.itemsBoundingRect()
@@ -606,6 +707,12 @@ if PYSIDE6_AVAILABLE:
         def mousePressEvent(self, event) -> None:  # type: ignore[override]
             self._press_pos = event.position() if hasattr(event, "position") else None
             item = self._graph_item_at(event)
+            # RG-009 按到节点 → 关闭画布平移，让节点跟随鼠标拖动；空白处 → 仍可平移画布
+            self._dragging_node = bool(item is not None and item.data(1) == "node")
+            self.setDragMode(
+                QGraphicsView.DragMode.NoDrag if self._dragging_node
+                else QGraphicsView.DragMode.ScrollHandDrag
+            )
             if item is not None:
                 payload = item.data(0)
                 payload_type = item.data(1)
@@ -614,12 +721,14 @@ if PYSIDE6_AVAILABLE:
             super().mousePressEvent(event)
 
         def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-            # RG-005 拖拽平移（ScrollHandDrag）视为手动调整视图，刷新时保持
-            if self._press_pos is not None and hasattr(event, "position"):
+            # RG-005 拖拽平移（非拖节点）视为手动调整视图，刷新时保持当前缩放
+            if (not self._dragging_node) and self._press_pos is not None and hasattr(event, "position"):
                 moved = (event.position() - self._press_pos).manhattanLength()
                 if moved > 3:
                     self._user_zoomed = True
             self._press_pos = None
+            self._dragging_node = False
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
             super().mouseReleaseEvent(event)
 
         def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
@@ -689,18 +798,15 @@ if PYSIDE6_AVAILABLE:
         def _edge_color(self, kind: str) -> QColor:
             return QColor(edge_color_hex(kind))
 
-        def _add_edge_arrow(self, tip, direction, color: QColor) -> None:
+        def _arrow_polygon(self, tip, direction) -> QPolygonF:
+            # RG-002 箭头三角：tip 落在目标节点边界，沿曲线末端切线指向
             tip_x, tip_y = tip
             ux, uy = direction
             size, wing = 13.0, 7.0
             base_x, base_y = tip_x - ux * size, tip_y - uy * size
             left = QPointF(base_x - uy * wing, base_y + ux * wing)
             right = QPointF(base_x + uy * wing, base_y - ux * wing)
-            arrow = QGraphicsPolygonItem(QPolygonF([QPointF(tip_x, tip_y), left, right]))
-            arrow.setBrush(QBrush(color))
-            arrow.setPen(QPen(color, 1))
-            arrow.setZValue(1)
-            self._scene.addItem(arrow)
+            return QPolygonF([QPointF(tip_x, tip_y), left, right])
 
 
     class ProjectShelfListWidget(QListWidget):

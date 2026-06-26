@@ -2790,6 +2790,44 @@ class UISmokeTests(unittest.TestCase):
         }
         self.assertEqual(len(centers), 3)
 
+    def test_pyside_relation_graph_rg009_drag_node_moves_label_and_edges(self) -> None:
+        from PySide6.QtWidgets import QApplication
+        from my_ai_novel.pyside_ui import RelationGraphView
+
+        QApplication.instance() or QApplication([])
+        view = RelationGraphView(lambda *a: None, lambda *a: None)
+        graph = {
+            "nodes": [
+                {"id": "character:1", "kind": "character", "name": "甲"},
+                {"id": "organization:1", "kind": "organization", "name": "家族"},
+            ],
+            "edges": [
+                {"source": "character:1", "target": "organization:1", "kind": "member_of",
+                 "confidence": "explicit", "id": "e1"},
+            ],
+        }
+        view.render_graph(graph, "character")
+        node = view._node_items["character:1"]
+        label = view._node_labels["character:1"]
+        record = view._edge_records[0]
+        path = record["path"].path()
+        start_before = path.pointAtPercent(0.0)
+        label_before = label.pos()
+        center = node.pos()
+
+        node.setPos(center.x() + 200, center.y() + 150)  # 触发 itemChange → 重连
+
+        label_after = label.pos()
+        start_after = record["path"].path().pointAtPercent(0.0)
+        # 标签随节点平移
+        self.assertAlmostEqual(label_after.x() - label_before.x(), 200, delta=1)
+        self.assertAlmostEqual(label_after.y() - label_before.y(), 150, delta=1)
+        # 连线起点跟随被拖动的节点
+        self.assertGreater(start_after.x() - start_before.x(), 150)
+        self.assertGreater(start_after.y() - start_before.y(), 100)
+        # 有向边箭头仍为三角形
+        self.assertEqual(record["arrow"].polygon().count(), 3)
+
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1
         while time.time() < deadline:

@@ -2798,11 +2798,21 @@ if PYSIDE6_AVAILABLE:
             left.addLayout(section_actions)
             self.structure_auto_next_enabled = QCheckBox("自动切换到下一节写作")
             self.structure_auto_next_chapter_enabled = QCheckBox("自动切换到下一章写作")
+            self.structure_auto_next_chapter_enabled.setToolTip(
+                "只在已拆分出小节的章节之间连续写作；写完已规划内容即停。\n"
+                "要写完自动续拆下一部分，请另勾选下面的连载续拆选项。"
+            )
+            self.structure_auto_continue_outline_enabled = QCheckBox("写完后自动生成下一部分大纲并继续(仅连载模式)")
+            self.structure_auto_continue_outline_enabled.setToolTip(
+                "连载模式专用：写完当前已规划的全部小节后，自动生成下一部分大纲并拆分，然后继续写作。默认关闭；本次最多自动续拆一部分。"
+            )
             self.structure_scene_plan_enabled = QCheckBox("自动化前先生成场景方案(更有结构,多一次调用)")
             left.addWidget(self.structure_auto_next_enabled)
             left.addWidget(self.structure_auto_next_chapter_enabled)
+            left.addWidget(self.structure_auto_continue_outline_enabled)
             left.addWidget(self.structure_scene_plan_enabled)
             left.addWidget(self._button("从当前小节自动化写作", self.start_chapter_automation))
+            left.addWidget(self._button("从断点继续写作(第一个未定稿小节)", self.continue_from_breakpoint))
             left.addWidget(self._button("中断自动化写作", self.interrupt_chapter_automation))
             layout.addWidget(left_frame, 1)
 
@@ -4742,23 +4752,98 @@ if PYSIDE6_AVAILABLE:
             if self._async_busy:
                 self._error("已有后台任务运行中，请稍候")
                 return
+            auto_next = self.structure_auto_next_chapter_enabled.isChecked()
+            auto_continue = bool(
+                getattr(self, "structure_auto_continue_outline_enabled", None) is not None
+                and self.structure_auto_continue_outline_enabled.isChecked()
+                and self._outline_mode_value() == "serial"
+            )
+            start_id = int(self.current_section_id)
+            start_section = self.store.get_section(start_id)
+            # CW-001 起始节已定稿：让用户选择跳到下一未定稿节或重写本节，避免静默覆盖
+            if start_section and start_section.get("status") == "finalized":
+                choice = self._ask_finalized_start_choice()
+                if choice == "cancel":
+                    return
+                if choice == "skip":
+                    nxt = self.pipeline.first_unfinalized_section(project_id)
+                    if nxt is None:
+                        self._ok("全书小节均已定稿，没有需要生成的内容")
+                        return
+                    start_id = int(nxt["id"])
+            # CW-004 会跨节/跨章的批量生成前确认（可"不再提醒"）
+            count = self.pipeline.count_writable_sections(project_id, start_id, auto_next)
+            if count > 1 and not getattr(self, "_suppress_batch_confirm", False):
+                if not self._confirm_batch_generation(count, auto_continue):
+                    return
+            start_chapter_id = int(self.store.get_section(start_id)["chapter_id"])
             cancel_event = threading.Event()
             self.automation_cancel_event = cancel_event
             self._run_async(
                 lambda: self._run_chapter_writing_automation(
                     project_id,
-                    int(self.current_chapter_id),
-                    int(self.current_section_id),
+                    start_chapter_id,
+                    start_id,
                     self.rewrite_mode.currentText(),
                     cancel_event,
-                    self.structure_auto_next_chapter_enabled.isChecked(),
+                    auto_next,
                     direction=self.rewrite_direction_input.text().strip(),
                     gen_scene_plan=self._scene_plan_enabled(),
+                    auto_continue_outline=auto_continue,
                 ),
                 "正在从当前小节开始自动化写作...",
                 "章节自动化写作完成",
                 self._after_chapter_automation,
             )
+
+        def continue_from_breakpoint(self) -> None:
+            # CW-002 从全书第一个未定稿小节继续，无需手动选章+节
+            project_id = self._project_required()
+            if not project_id:
+                return
+            if self._async_busy:
+                self._error("已有后台任务运行中，请稍候")
+                return
+            section = self.pipeline.first_unfinalized_section(project_id)
+            if section is None:
+                self._ok("全书小节均已定稿，没有可继续的断点")
+                return
+            self.refresh_structure()
+            self.select_chapter_by_id(int(section["chapter_id"]))
+            self.select_section_by_id(int(section["id"]))
+            self.start_chapter_automation()
+
+        def _ask_finalized_start_choice(self) -> str:
+            box = QMessageBox(self.window)
+            box.setWindowTitle("该小节已定稿")
+            box.setText("当前选中的小节已定稿。要跳到下一个未定稿小节继续，还是重写本节？")
+            skip_btn = box.addButton("跳到下一未定稿节", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("重写本节", QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(skip_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                return "cancel"
+            if clicked is skip_btn:
+                return "skip"
+            return "rewrite"
+
+        def _confirm_batch_generation(self, count: int, auto_continue: bool) -> bool:
+            extra = "，并在写完后自动续拆下一部分大纲继续" if auto_continue else ""
+            box = QMessageBox(self.window)
+            box.setWindowTitle("确认连续写作")
+            box.setText(
+                f"本次将连续生成约 {count} 个未定稿小节{extra}。\n已定稿的小节会自动跳过、不会被覆盖。是否继续？"
+            )
+            box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            box.setDefaultButton(QMessageBox.StandardButton.Yes)
+            dont_remind = QCheckBox("本次会话不再提醒")
+            box.setCheckBox(dont_remind)
+            result = box.exec()
+            if dont_remind.isChecked():
+                self._suppress_batch_confirm = True
+            return result == QMessageBox.StandardButton.Yes
 
         def interrupt_chapter_automation(self) -> None:
             if self.automation_cancel_event is None:
@@ -4777,34 +4862,62 @@ if PYSIDE6_AVAILABLE:
             auto_next_chapter: bool = False,
             direction: str = "",
             gen_scene_plan: bool = False,
+            auto_continue_outline: bool = False,
+            max_outline_continues: int = 1,
         ) -> dict[str, Any]:
             processed: list[int] = []
-            section_id = start_section_id
+            outline_continues = 0
+            last_section_id = start_section_id
             self._configure_llm_retry(cancel_event)
             try:
-                while True:
+                section = self.store.get_section(start_section_id)
+                while section is not None:
                     self._raise_if_automation_cancelled(cancel_event)
-                    section = self.store.get_section(section_id)
-                    if not section or int(section["chapter_id"]) != int(chapter_id):
+                    cur_chapter_id = int(section["chapter_id"])
+                    cur_number = int(section.get("number", 0))
+                    self._run_writing_automation(
+                        project_id, int(section["id"]), rewrite_mode, cancel_event, direction, gen_scene_plan
+                    )
+                    processed.append(int(section["id"]))
+                    last_section_id = int(section["id"])
+                    # CW-001 推进到下一个「未定稿」小节，跳过已定稿；auto_next_chapter 决定是否跨章
+                    nxt = self.pipeline.next_unfinalized_section(
+                        project_id, cur_chapter_id, cur_number, auto_next_chapter
+                    )
+                    # 离开本章（或写到头）→ 为刚写完的这一章写章末记忆
+                    if nxt is None or int(nxt["chapter_id"]) != cur_chapter_id:
+                        self._try_write_chapter_memory(project_id, cur_chapter_id, cancel_event)
+                    if nxt is None:
+                        # CW-003 可选：连载模式写完已规划内容后自动续拆下一部分并继续（带次数上限）
+                        if auto_continue_outline and outline_continues < max_outline_continues:
+                            outline_continues += 1
+                            new_section = self._auto_continue_outline(project_id, cancel_event)
+                            if new_section is not None:
+                                section = new_section
+                                continue
                         break
-                    result = self._run_writing_automation(project_id, section_id, rewrite_mode, cancel_event, direction, gen_scene_plan)
-                    processed.append(section_id)
-                    next_section = result.get("next_section")
-                    if isinstance(next_section, dict) and int(next_section.get("chapter_id", chapter_id)) == int(chapter_id):
-                        section_id = int(next_section["id"])
-                        continue
-                    self._try_write_chapter_memory(project_id, chapter_id, cancel_event)
-                    if auto_next_chapter:
-                        next_chapter_section = self._first_section_in_next_chapter(project_id, chapter_id)
-                        if next_chapter_section is not None:
-                            chapter_id = int(next_chapter_section["chapter_id"])
-                            section_id = int(next_chapter_section["id"])
-                            continue
-                    return {"processed": processed, "last_section_id": section_id, "next_section": None}
+                    section = nxt
+                return {
+                    "processed": processed,
+                    "last_section_id": last_section_id,
+                    "next_section": None,
+                    "outline_continues": outline_continues,
+                }
             finally:
                 if hasattr(self.services.llm, "configure_retry_until_cancel"):
                     self.services.llm.configure_retry_until_cancel(None, None)
-            return {"processed": processed, "last_section_id": section_id, "next_section": None}
+
+        def _auto_continue_outline(
+            self, project_id: int, cancel_event: threading.Event | None = None
+        ) -> dict[str, Any] | None:
+            # CW-003 连载续拆：生成下一部分大纲 + 确认拆分，返回新的第一个未定稿小节
+            self._raise_if_automation_cancelled(cancel_event)
+            outline = self.pipeline.expand_global_concept(
+                project_id, {"outline_mode": "serial", "serial_action": "next_part"}
+            )
+            self._raise_if_automation_cancelled(cancel_event)
+            self.pipeline.confirm_outline_split(project_id, int(outline["version_id"]))
+            return self.pipeline.first_unfinalized_section(project_id)
 
         def _try_write_chapter_memory(
             self,

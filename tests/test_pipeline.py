@@ -1134,6 +1134,56 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.pipeline.continue_next_section(section["id"])
 
+    def _build_two_chapter_structure(self):
+        # 两章，各 2 节；返回 id 便于按需定稿
+        c1 = self.store.save_chapter(self.project_id, {"number": 1, "title": "章一"})
+        c2 = self.store.save_chapter(self.project_id, {"number": 2, "title": "章二"})
+        s = {
+            "1-1": self.store.save_section(c1, {"number": 1, "title": "1-1"}),
+            "1-2": self.store.save_section(c1, {"number": 2, "title": "1-2"}),
+            "2-1": self.store.save_section(c2, {"number": 1, "title": "2-1"}),
+            "2-2": self.store.save_section(c2, {"number": 2, "title": "2-2"}),
+        }
+        return {"c1": c1, "c2": c2, "s": s}
+
+    def _finalize(self, section_id: int) -> None:
+        vid = self.store.save_version({
+            "project_id": self.project_id, "section_id": section_id,
+            "kind": "draft", "label": "定稿", "content": "正文", "status": "usable",
+        })
+        self.store.finalize_section(section_id, vid)
+
+    def test_next_unfinalized_section_skips_finalized_within_chapter(self) -> None:
+        struct = self._build_two_chapter_structure()
+        s = struct["s"]
+        self._finalize(s["1-2"])  # 1-1 未定稿, 1-2 已定稿
+        nxt = self.pipeline.next_unfinalized_section(self.project_id, struct["c1"], 1, cross_chapter=False)
+        self.assertIsNone(nxt)  # 章内下一节已定稿被跳过，无更多
+        nxt = self.pipeline.next_unfinalized_section(self.project_id, struct["c1"], 1, cross_chapter=True)
+        self.assertEqual(nxt["id"], s["2-1"])  # 跨章跳到 2-1
+
+    def test_next_unfinalized_section_skips_finalized_across_chapters(self) -> None:
+        struct = self._build_two_chapter_structure()
+        s = struct["s"]
+        self._finalize(s["2-1"])
+        nxt = self.pipeline.next_unfinalized_section(self.project_id, struct["c1"], 2, cross_chapter=True)
+        self.assertEqual(nxt["id"], s["2-2"])  # 跳过已定稿的 2-1
+
+    def test_first_unfinalized_section_finds_breakpoint(self) -> None:
+        struct = self._build_two_chapter_structure()
+        s = struct["s"]
+        self._finalize(s["1-1"]); self._finalize(s["1-2"])
+        self.assertEqual(self.pipeline.first_unfinalized_section(self.project_id)["id"], s["2-1"])
+        self._finalize(s["2-1"]); self._finalize(s["2-2"])
+        self.assertIsNone(self.pipeline.first_unfinalized_section(self.project_id))
+
+    def test_count_writable_sections(self) -> None:
+        struct = self._build_two_chapter_structure()
+        s = struct["s"]
+        self._finalize(s["1-2"])
+        self.assertEqual(self.pipeline.count_writable_sections(self.project_id, s["1-1"], cross_chapter=True), 3)
+        self.assertEqual(self.pipeline.count_writable_sections(self.project_id, s["1-1"], cross_chapter=False), 1)
+
     def test_confirm_outline_split_creates_world_item_candidates(self) -> None:
         metadata = {
             "expanded_outline": "结构化总体框架",

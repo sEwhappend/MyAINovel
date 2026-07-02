@@ -1244,6 +1244,57 @@ class NovelPipeline:
                 return candidate
         raise ValueError("当前章节没有下一节")
 
+    def next_unfinalized_section(
+        self, project_id: int, chapter_id: int, section_number: int, cross_chapter: bool
+    ) -> dict[str, Any] | None:
+        """CW-001 连续写作推进：返回下一个「未定稿」小节，跳过已定稿的，避免自动化重写已定稿内容。
+
+        先在本章内找 number 更大且未定稿的最小节；找不到且 cross_chapter 时，
+        再到后续章节里找第一个未定稿小节。全部已定稿则返回 None。
+        """
+        in_chapter = sorted(self.store.list_sections(chapter_id), key=lambda s: int(s.get("number", 0)))
+        for candidate in in_chapter:
+            if int(candidate.get("number", 0)) > int(section_number) and candidate.get("status") != "finalized":
+                return candidate
+        if not cross_chapter:
+            return None
+        chapters = self.store.list_chapters(project_id)
+        index = next((i for i, c in enumerate(chapters) if int(c["id"]) == int(chapter_id)), None)
+        if index is None:
+            return None
+        for chapter in chapters[index + 1:]:
+            for candidate in sorted(self.store.list_sections(int(chapter["id"])), key=lambda s: int(s.get("number", 0))):
+                if candidate.get("status") != "finalized":
+                    return candidate
+        return None
+
+    def first_unfinalized_section(self, project_id: int) -> dict[str, Any] | None:
+        """CW-002 断点续写：按阅读顺序返回全书第一个未定稿小节；全定稿返回 None。"""
+        for chapter in self.store.list_chapters(project_id):
+            for candidate in sorted(self.store.list_sections(int(chapter["id"])), key=lambda s: int(s.get("number", 0))):
+                if candidate.get("status") != "finalized":
+                    return candidate
+        return None
+
+    def count_writable_sections(
+        self, project_id: int, start_section_id: int, cross_chapter: bool
+    ) -> int:
+        """CW-004 启动确认：从起始节起、按连续写作推进规则，将实际生成的小节数（含起始节）。"""
+        start = self.store.get_section(start_section_id)
+        if not start:
+            return 0
+        count = 1
+        chapter_id = int(start["chapter_id"])
+        number = int(start.get("number", 0))
+        while True:
+            nxt = self.next_unfinalized_section(project_id, chapter_id, number, cross_chapter)
+            if not nxt:
+                break
+            count += 1
+            chapter_id = int(nxt["chapter_id"])
+            number = int(nxt.get("number", 0))
+        return count
+
     def _section_step(
         self,
         project_id: int,

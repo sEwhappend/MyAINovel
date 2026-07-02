@@ -2272,7 +2272,7 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn("def _try_write_chapter_memory(", source)
         self.assertIn("self.services.llm.configure_retry_until_cancel(None, None)", source)
         self.assertIn("return {\"ok\": True, **self.pipeline.write_chapter_memory(project_id, chapter_id)}", source)
-        self.assertIn("self._try_write_chapter_memory(project_id, chapter_id, cancel_event)", source)
+        self.assertIn("self._try_write_chapter_memory(project_id, cur_chapter_id, cancel_event)", source)
 
     def test_pyside_writing_refresh_preserves_current_section(self) -> None:
         source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
@@ -2827,6 +2827,112 @@ class UISmokeTests(unittest.TestCase):
         self.assertGreater(start_after.y() - start_before.y(), 100)
         # 有向边箭头仍为三角形
         self.assertEqual(record["arrow"].polygon().count(), 3)
+
+    def test_cw_continuous_writing_ui_wiring(self) -> None:
+        source = (SRC / "my_ai_novel" / "pyside_ui.py").read_text(encoding="utf-8")
+        # CW-002 断点续写入口
+        self.assertIn("def continue_from_breakpoint", source)
+        self.assertIn("从断点继续写作", source)
+        self.assertIn("first_unfinalized_section(project_id)", source)
+        # CW-003 续拆开关 + worker 参数
+        self.assertIn("self.structure_auto_continue_outline_enabled = QCheckBox", source)
+        self.assertIn("def _auto_continue_outline", source)
+        self.assertIn("auto_continue_outline", source)
+        self.assertIn("max_outline_continues", source)
+        # CW-001 推进跳过已定稿
+        self.assertIn("next_unfinalized_section(", source)
+        # CW-004 启动确认 + 起始节已定稿处理
+        self.assertIn("def _confirm_batch_generation", source)
+        self.assertIn("def _ask_finalized_start_choice", source)
+        self.assertIn("_suppress_batch_confirm", source)
+        self.assertIn("count_writable_sections(", source)
+
+    def _make_automation_ui(self):
+        import threading
+        import types
+        import uuid as _uuid
+
+        from PySide6.QtWidgets import QApplication
+        from my_ai_novel.pipeline import NovelPipeline
+        from my_ai_novel.pyside_ui import NovelDesktopUI as PySideUI
+        from my_ai_novel.storage import NovelStore
+        from tests.test_pipeline import FakeLLM, TEST_OUTPUT
+
+        QApplication.instance() or QApplication([])
+        TEST_OUTPUT.mkdir(exist_ok=True)
+        case = _uuid.uuid4().hex
+        store = NovelStore(TEST_OUTPUT / f"cw_{case}.db", projects_root=TEST_OUTPUT / f"cw_{case}_projects")
+        pipeline = NovelPipeline(store, FakeLLM())
+        project_id = store.create_project({"title": "连续写作测试", "global_concept": "测试"})
+        ui = object.__new__(PySideUI)
+        ui.store = store
+        ui.pipeline = pipeline
+        ui.services = types.SimpleNamespace(llm=object())
+        # 桩：只记录被写的小节并将其定稿，使推进逻辑能前进
+        written = []
+
+        def fake_write(pid, section_id, *a, **k):
+            written.append(int(section_id))
+            vid = store.save_version({
+                "project_id": pid, "section_id": int(section_id),
+                "kind": "draft", "label": "定稿", "content": "正文", "status": "usable",
+            })
+            store.finalize_section(int(section_id), vid)
+            return {"next_section": None}
+
+        ui._run_writing_automation = fake_write
+        ui._try_write_chapter_memory = lambda *a, **k: {"ok": True}
+        return ui, store, project_id, written, threading
+
+    def test_cw001_automation_skips_finalized_sections(self) -> None:
+        ui, store, project_id, written, threading = self._make_automation_ui()
+        c1 = store.save_chapter(project_id, {"number": 1, "title": "章一"})
+        c2 = store.save_chapter(project_id, {"number": 2, "title": "章二"})
+        s11 = store.save_section(c1, {"number": 1, "title": "1-1"})
+        s12 = store.save_section(c1, {"number": 2, "title": "1-2"})
+        s21 = store.save_section(c2, {"number": 1, "title": "2-1"})
+        s22 = store.save_section(c2, {"number": 2, "title": "2-2"})
+        # 预先定稿 1-2，自动化不应重写它
+        vid = store.save_version({"project_id": project_id, "section_id": s12, "kind": "draft",
+                                  "label": "定稿", "content": "已写", "status": "usable"})
+        store.finalize_section(s12, vid)
+        finalized_before = store.get_section(s12)["finalized_version_id"]
+
+        ui._run_chapter_writing_automation(
+            project_id, c1, s11, "重写整体", threading.Event(), auto_next_chapter=True
+        )
+        # 只写未定稿的，跳过已定稿的 1-2
+        self.assertEqual(written, [s11, s21, s22])
+        self.assertNotIn(s12, written)
+        # 已定稿的 1-2 定稿指针未被替换
+        self.assertEqual(store.get_section(s12)["finalized_version_id"], finalized_before)
+
+    def test_cw003_auto_continue_outline_respects_cap(self) -> None:
+        ui, store, project_id, written, threading = self._make_automation_ui()
+        c1 = store.save_chapter(project_id, {"number": 1, "title": "章一"})
+        s11 = store.save_section(c1, {"number": 1, "title": "1-1"})
+        calls = {"n": 0}
+
+        def fake_continue(pid, cancel_event=None):
+            calls["n"] += 1
+            return None  # 不再产生新小节
+
+        ui._auto_continue_outline = fake_continue
+        # 开启续拆、上限 1：写完 1-1 后应调用续拆恰好一次
+        ui._run_chapter_writing_automation(
+            project_id, c1, s11, "重写整体", threading.Event(),
+            auto_next_chapter=True, auto_continue_outline=True, max_outline_continues=1,
+        )
+        self.assertEqual(written, [s11])
+        self.assertEqual(calls["n"], 1)
+        # 关闭续拆：不应调用
+        calls["n"] = 0
+        store.unfinalize_section(s11)
+        ui._run_chapter_writing_automation(
+            project_id, c1, s11, "重写整体", threading.Event(),
+            auto_next_chapter=True, auto_continue_outline=False,
+        )
+        self.assertEqual(calls["n"], 0)
 
     def _wait_until(self, predicate) -> None:
         deadline = time.time() + 1
